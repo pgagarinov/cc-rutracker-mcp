@@ -21,7 +21,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite.workspace = true
 security-framework = "3"
 dirs = "5"
 

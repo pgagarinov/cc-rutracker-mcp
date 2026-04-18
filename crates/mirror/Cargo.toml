@@ -1,0 +1,33 @@
+[package]
+name = "rutracker-mirror"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+fail-injection = []
+
+[dependencies]
+rutracker-parser = { path = "../parser" }
+rutracker-http = { path = "../http" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+tokio = { workspace = true, features = ["time"] }
+fs2 = "0.4"
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+encoding_rs.workspace = true
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true

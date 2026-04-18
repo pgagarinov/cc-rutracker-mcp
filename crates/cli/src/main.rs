@@ -98,6 +98,80 @@ enum Cmd {
         #[arg(long)]
         allow_path: bool,
     },
+    /// Local mirror commands (v1: watchlist only).
+    Mirror {
+        #[command(subcommand)]
+        cmd: MirrorCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MirrorCmd {
+    /// Initialise a mirror root (creates dirs + state.db).
+    Init {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Refresh `structure.json` from the live index.
+    Structure {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Manage the forum watchlist.
+    Watch {
+        #[command(subcommand)]
+        cmd: WatchCmd,
+    },
+    /// Sync the watchlist (or the forums given via --forum) into the local mirror.
+    Sync {
+        /// Restrict sync to these forum ids. Repeatable. Empty ⇒ use the watchlist.
+        #[arg(long = "forum")]
+        forums: Vec<String>,
+        #[arg(long, default_value_t = 500)]
+        max_topics: usize,
+        #[arg(long, default_value_t = 1.0)]
+        rate_rps: f32,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Pretty-print a cached topic JSON. ARG is `<forum_id>/<topic_id>`.
+    Show {
+        target: String,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Report per-forum topic counts, last-sync outcomes, and active cooldowns.
+    Status {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Rebuild `state.db` from the on-disk JSON layer.
+    RebuildIndex {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WatchCmd {
+    /// Add a forum id to the watchlist.
+    Add {
+        forum_id: String,
+        /// Override the mirror root (defaults to $RUTRACKER_MIRROR_ROOT or $HOME/.rutracker/mirror).
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Remove a forum id from the watchlist.
+    Remove {
+        forum_id: String,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// List watchlisted forums.
+    List {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -200,6 +274,78 @@ async fn main() -> Result<()> {
             .context("download failed")?;
             println!("{}", path.display());
         }
+        Cmd::Mirror { cmd } => match cmd {
+            MirrorCmd::Init { root } => {
+                run_mirror_init(&cfg, &MirrorRootArgs { root })
+                    .await
+                    .context("mirror init failed")?;
+            }
+            MirrorCmd::Structure { root } => {
+                run_mirror_structure(&cfg, &MirrorRootArgs { root })
+                    .await
+                    .context("mirror structure failed")?;
+            }
+            MirrorCmd::Watch { cmd } => match cmd {
+                WatchCmd::Add { forum_id, root } => {
+                    run_watch_add(&cfg, &WatchArgs { forum_id, root })
+                        .await
+                        .context("watch add failed")?;
+                }
+                WatchCmd::Remove { forum_id, root } => {
+                    run_watch_remove(&cfg, &WatchArgs { forum_id, root })
+                        .await
+                        .context("watch remove failed")?;
+                }
+                WatchCmd::List { root } => {
+                    run_watch_list(&cfg, &WatchListArgs { root })
+                        .await
+                        .context("watch list failed")?;
+                }
+            },
+            MirrorCmd::Sync {
+                forums,
+                max_topics,
+                rate_rps,
+                root,
+            } => {
+                run_mirror_sync(
+                    &cfg,
+                    &SyncCliArgs {
+                        root,
+                        forums,
+                        max_topics,
+                        rate_rps,
+                    },
+                )
+                .await
+                .context("mirror sync failed")?;
+            }
+            MirrorCmd::Show { target, root } => {
+                let (forum_id, topic_id) = target.split_once('/').ok_or_else(|| {
+                    anyhow::anyhow!("expected <forum_id>/<topic_id>, got {target}")
+                })?;
+                run_mirror_show(
+                    &cfg,
+                    &ShowArgs {
+                        root,
+                        forum_id: forum_id.to_string(),
+                        topic_id: topic_id.to_string(),
+                    },
+                )
+                .await
+                .context("mirror show failed")?;
+            }
+            MirrorCmd::Status { root } => {
+                run_mirror_status(&cfg, &MirrorRootArgs { root })
+                    .await
+                    .context("mirror status failed")?;
+            }
+            MirrorCmd::RebuildIndex { root } => {
+                run_mirror_rebuild_index(&cfg, &MirrorRootArgs { root })
+                    .await
+                    .context("mirror rebuild-index failed")?;
+            }
+        },
     }
     Ok(())
 }

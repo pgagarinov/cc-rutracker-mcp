@@ -3,6 +3,7 @@ members = [
     "crates/parser",
     "crates/http",
     "crates/cookies-macos",
+    "crates/mirror",
     "crates/cli",
     "crates/mcp",
 ]
@@ -34,6 +35,9 @@ thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# SQLite (cookies-macos + mirror crates)
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Crypto / cookie extraction (cookies-macos crate)
 aes = "0.8"

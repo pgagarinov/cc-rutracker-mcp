@@ -5,13 +5,16 @@
 
 pub mod error;
 pub mod forum_index;
+pub mod forum_page;
 pub mod metadata;
 pub mod models;
+pub mod row;
 pub mod search;
 pub mod text_format;
 pub mod topic;
 
 pub use error::{Error, Result};
 pub use models::{
-    CategoryGroup, Comment, ForumCategory, SearchPage, SearchResult, TopicDetails, TopicMetadata,
+    CategoryGroup, Comment, ForumCategory, ForumListing, RowCommon, SearchPage, SearchResult,
+    TopicDetails, TopicMetadata, TopicRow,
 };

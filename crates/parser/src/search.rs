@@ -1,6 +1,11 @@
 //! Search results (tracker.php) parser.
+//!
+//! The per-row field extraction (`topic_id`, `title`, `author`, `size`, `seeds`, `leeches`) lives
+//! in [`crate::row::parse_topic_row`] so `viewforum.php` and `tracker.php` share one code path.
+//! This module adds only the page-level chrome (row selector, `search_id`) and the
+//! search-specific `category` column.
 
-use crate::{Error, Result, SearchPage, SearchResult};
+use crate::{row::parse_topic_row, Error, Result, SearchPage, SearchResult};
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 
@@ -10,48 +15,24 @@ pub fn parse_search_page(html: &str) -> Result<SearchPage> {
     let doc = Html::parse_document(html);
 
     let tbody_sel = Selector::parse("table#tor-tbl tbody tr").unwrap();
-    let title_link_sel = Selector::parse("a.tLink").unwrap();
-    let seed_sel =
-        Selector::parse("b.seedmed, td.seedmed, b.seed, td.seed, td.row4.nowrap").unwrap();
-    let leech_sel = Selector::parse("td.leechmed, b.leechmed, td.leech, b.leech").unwrap();
-    let size_sel = Selector::parse("td.tor-size u, td.tor-size").unwrap();
-    // Author cell: `td.u-name-col` holds `<div class="u-name"><a class="med ts-text">…</a></div>`.
-    // The preexisting Python selector `a.u-link` was stale — this replacement is the Phase 1 fix.
-    let author_sel = Selector::parse("td.u-name-col a").unwrap();
     // Category cell: `td.f-name-col a` / `a.gen` (both match in current HTML).
     let cat_sel = Selector::parse("td.f-name-col a, a.gen").unwrap();
     let pg_sel = Selector::parse("a.pg").unwrap();
 
     let mut results = Vec::new();
     for row in doc.select(&tbody_sel) {
-        let Some(link) = row.select(&title_link_sel).next() else {
+        let Some(common) = parse_topic_row(&row) else {
             continue;
         };
-        let href = link.value().attr("href").unwrap_or("");
-        let Some(topic_id) = extract_topic_id(href) else {
-            continue;
-        };
-
-        let title = link.text().collect::<String>().trim().to_string();
-        let size = first_text(&row, &size_sel).trim().to_string();
-        let seeds = first_text(&row, &seed_sel)
-            .trim()
-            .parse::<u32>()
-            .unwrap_or(0);
-        let leeches = first_text(&row, &leech_sel)
-            .trim()
-            .parse::<u32>()
-            .unwrap_or(0);
-        let author = first_text(&row, &author_sel).trim().to_string();
         let category = first_text(&row, &cat_sel).trim().to_string();
 
         results.push(SearchResult {
-            topic_id,
-            title,
-            size,
-            seeds,
-            leeches,
-            author,
+            topic_id: common.topic_id,
+            title: common.title,
+            size: common.size,
+            seeds: common.seeds,
+            leeches: common.leeches,
+            author: common.author,
             category,
         });
     }
@@ -72,11 +53,6 @@ fn first_text(row: &ElementRef<'_>, sel: &Selector) -> String {
         .next()
         .map(|e| e.text().collect::<String>())
         .unwrap_or_default()
-}
-
-fn extract_topic_id(href: &str) -> Option<u64> {
-    let re = Regex::new(r"t=(\d+)").ok()?;
-    re.captures(href)?.get(1)?.as_str().parse::<u64>().ok()
 }
 
 fn extract_search_id(doc: &Html, pg_sel: &Selector) -> Option<String> {

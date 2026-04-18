@@ -227,10 +227,294 @@ pub async fn run_download(cfg: &CliConfig, args: &DownloadArgs) -> Result<PathBu
     Ok(path)
 }
 
+// -------- mirror watchlist --------
+
+#[derive(Debug, Clone)]
+pub struct WatchArgs {
+    pub forum_id: String,
+    /// Override the mirror root. `None` means `rutracker_mirror::default_root()`.
+    pub root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WatchListArgs {
+    pub root: Option<PathBuf>,
+}
+
+fn mirror_root(root: Option<&PathBuf>) -> PathBuf {
+    root.cloned().unwrap_or_else(rutracker_mirror::default_root)
+}
+
+pub async fn run_watch_add(cfg: &CliConfig, args: &WatchArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let structure_path = root.join("structure.json");
+    let structure_bytes = std::fs::read(&structure_path).with_context(|| {
+        format!(
+            "reading {} — run `rutracker mirror init` and `mirror structure` first",
+            structure_path.display()
+        )
+    })?;
+    let structure: rutracker_mirror::structure::Structure =
+        serde_json::from_slice(&structure_bytes)?;
+
+    let mut wl = rutracker_mirror::watchlist::load(&root)?;
+    rutracker_mirror::watchlist::add(&mut wl, &structure, &args.forum_id)?;
+    rutracker_mirror::watchlist::save(&root, &wl)?;
+
+    let text = format_watchlist_text(&wl);
+    let out = render(cfg, &wl, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+pub async fn run_watch_remove(cfg: &CliConfig, args: &WatchArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let mut wl = rutracker_mirror::watchlist::load(&root)?;
+    rutracker_mirror::watchlist::remove(&mut wl, &args.forum_id);
+    rutracker_mirror::watchlist::save(&root, &wl)?;
+
+    let text = format_watchlist_text(&wl);
+    let out = render(cfg, &wl, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+pub async fn run_watch_list(cfg: &CliConfig, args: &WatchListArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let wl = rutracker_mirror::watchlist::load(&root)?;
+
+    let text = format_watchlist_text(&wl);
+    let out = render(cfg, &wl, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+fn format_watchlist_text(wl: &rutracker_mirror::config::Watchlist) -> String {
+    if wl.forums.is_empty() {
+        return "(watchlist empty)".to_string();
+    }
+    let mut s = String::new();
+    for e in &wl.forums {
+        s.push_str(&format!(
+            "[{}] {} (added {})\n",
+            e.forum_id, e.name, e.added_at
+        ));
+    }
+    s
+}
+
+// -------- mirror init / structure / sync / show / status / rebuild-index --------
+
+#[derive(Debug, Clone, Default)]
+pub struct MirrorRootArgs {
+    pub root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SyncCliArgs {
+    pub root: Option<PathBuf>,
+    /// Forum ids to sync. Empty ⇒ use the watchlist.
+    pub forums: Vec<String>,
+    pub max_topics: usize,
+    pub rate_rps: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowArgs {
+    pub root: Option<PathBuf>,
+    pub forum_id: String,
+    pub topic_id: String,
+}
+
+pub async fn run_mirror_init(cfg: &CliConfig, args: &MirrorRootArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    rutracker_mirror::Mirror::init(&root)?;
+    let payload = serde_json::json!({
+        "initialized": true,
+        "root": root.display().to_string(),
+    });
+    let text = format!("initialized mirror at {}\n", root.display());
+    let out = render(cfg, &payload, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+pub async fn run_mirror_structure(cfg: &CliConfig, args: &MirrorRootArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let client = cfg.client()?;
+    let structure = rutracker_mirror::structure::refresh_structure(&root, &client).await?;
+    let text = format!(
+        "structure.json written ({} groups)\n",
+        structure.groups.len()
+    );
+    let out = render(cfg, &structure, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+pub async fn run_mirror_sync(cfg: &CliConfig, args: &SyncCliArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let client = cfg.client()?;
+    let mut mirror = rutracker_mirror::Mirror::open(&root, Some(client.clone()))?;
+
+    let forum_ids: Vec<String> = if args.forums.is_empty() {
+        let wl = rutracker_mirror::watchlist::load(&root)?;
+        wl.forums.iter().map(|e| e.forum_id.clone()).collect()
+    } else {
+        args.forums.clone()
+    };
+
+    let opts = rutracker_mirror::engine::SyncOpts {
+        max_topics: args.max_topics,
+        max_pages: 100,
+        rate_rps: args.rate_rps,
+    };
+
+    let mut reports = Vec::with_capacity(forum_ids.len());
+    for forum_id in &forum_ids {
+        let mut engine = rutracker_mirror::engine::SyncEngine::new(&mut mirror, client.clone());
+        let report = engine.sync_forum(forum_id, opts.clone()).await?;
+        reports.push((forum_id.clone(), report));
+    }
+
+    let payload = serde_json::json!({
+        "forums": reports.iter().map(|(fid, r)| serde_json::json!({
+            "forum_id": fid,
+            "files_written": r.files_written,
+            "rows_upserted": r.rows_upserted,
+            "rows_parsed": r.rows_parsed,
+            "rows_unchanged": r.rows_unchanged,
+            "forums_rate_limited": r.forums_rate_limited,
+        })).collect::<Vec<_>>(),
+    });
+    let mut text = String::new();
+    for (fid, r) in &reports {
+        text.push_str(&format!(
+            "{}: parsed={} written={} unchanged={} rate_limited={}\n",
+            fid, r.rows_parsed, r.files_written, r.rows_unchanged, r.forums_rate_limited
+        ));
+    }
+    let out = render(cfg, &payload, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+pub async fn run_mirror_show(cfg: &CliConfig, args: &ShowArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let path = root
+        .join("forums")
+        .join(&args.forum_id)
+        .join("topics")
+        .join(format!("{}.json", args.topic_id));
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("reading topic file {}", path.display()))?;
+    let file: rutracker_mirror::topic_io::TopicFile = serde_json::from_slice(&bytes)?;
+
+    let text = format!(
+        "{} (forum {}, topic {})\nlast_post_id={} last_post_at={}\ncomments={}\n",
+        file.title,
+        file.forum_id,
+        file.topic_id,
+        file.last_post_id,
+        file.last_post_at,
+        file.comments.len(),
+    );
+    let out = render(cfg, &file, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+pub async fn run_mirror_status(cfg: &CliConfig, args: &MirrorRootArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let mirror = rutracker_mirror::Mirror::open(&root, None)?;
+    let now = chrono::Utc::now();
+
+    #[derive(Serialize)]
+    struct ForumStatus {
+        forum_id: String,
+        topics_count: i64,
+        last_sync_started_at: Option<String>,
+        last_sync_completed_at: Option<String>,
+        last_sync_outcome: Option<String>,
+        cooldown_until: Option<String>,
+        cooldown_seconds_remaining: i64,
+    }
+
+    let mut forums: Vec<ForumStatus> = Vec::new();
+    let conn = mirror.state().conn();
+    let mut stmt = conn.prepare(
+        "SELECT forum_id, last_sync_started_at, last_sync_completed_at, last_sync_outcome, \
+                cooldown_until \
+         FROM forum_state ORDER BY forum_id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    for (forum_id, started, completed, outcome, cooldown_until) in rows {
+        let topics_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM topic_index WHERE forum_id = ?1",
+            [&forum_id],
+            |r| r.get(0),
+        )?;
+        let cooldown_seconds_remaining = cooldown_until
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| (dt.with_timezone(&chrono::Utc) - now).num_seconds().max(0))
+            .unwrap_or(0);
+        forums.push(ForumStatus {
+            forum_id,
+            topics_count,
+            last_sync_started_at: started,
+            last_sync_completed_at: completed,
+            last_sync_outcome: outcome,
+            cooldown_until,
+            cooldown_seconds_remaining,
+        });
+    }
+
+    let payload = serde_json::json!({ "forums": forums });
+    let mut text = String::new();
+    for f in &forums {
+        text.push_str(&format!(
+            "{}: topics={} outcome={} cooldown_remaining={}s\n",
+            f.forum_id,
+            f.topics_count,
+            f.last_sync_outcome.as_deref().unwrap_or("-"),
+            f.cooldown_seconds_remaining,
+        ));
+    }
+    let out = render(cfg, &payload, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
+pub async fn run_mirror_rebuild_index(cfg: &CliConfig, args: &MirrorRootArgs) -> Result<String> {
+    let root = mirror_root(args.root.as_ref());
+    let mut mirror = rutracker_mirror::Mirror::open(&root, None)?;
+    let inserted = rutracker_mirror::engine::rebuild_index(&mut mirror)?;
+    let payload = serde_json::json!({ "inserted": inserted });
+    let text = format!("rebuilt topic_index: {} rows\n", inserted);
+    let out = render(cfg, &payload, &text)?;
+    emit(cfg, &out).await?;
+    Ok(out)
+}
+
 pub mod prelude {
     pub use super::{
-        run_browse, run_categories, run_download, run_search, run_topic, BrowseArgs, CliConfig,
-        DownloadArgs, OutputFormat, SearchArgs, TopicArgs,
+        run_browse, run_categories, run_download, run_mirror_init, run_mirror_rebuild_index,
+        run_mirror_show, run_mirror_status, run_mirror_structure, run_mirror_sync, run_search,
+        run_topic, run_watch_add, run_watch_list, run_watch_remove, BrowseArgs, CliConfig,
+        DownloadArgs, MirrorRootArgs, OutputFormat, SearchArgs, ShowArgs, SyncCliArgs, TopicArgs,
+        WatchArgs, WatchListArgs,
     };
 }
 
@@ -441,6 +725,147 @@ mod tests {
         .await
         .unwrap();
         assert!(path.starts_with(&outside));
+    }
+
+    #[tokio::test]
+    async fn test_watch_list_json_is_valid_array() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("watch-list");
+
+        // Seed a minimal structure.json so `add` can resolve names.
+        let structure = serde_json::json!({
+            "schema_version": 1,
+            "groups": [{
+                "group_id": "1",
+                "title": "Кино",
+                "forums": [{
+                    "forum_id": "252",
+                    "name": "Зарубежные фильмы",
+                    "parent_id": null
+                }]
+            }],
+            "fetched_at": null
+        });
+        std::fs::write(
+            tmp.join("structure.json"),
+            serde_json::to_vec_pretty(&structure).unwrap(),
+        )
+        .unwrap();
+
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        run_watch_add(
+            &cfg,
+            &WatchArgs {
+                forum_id: "252".into(),
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let out = run_watch_list(
+            &cfg,
+            &WatchListArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let forums = json["forums"]
+            .as_array()
+            .expect("forums must be a JSON array");
+        assert_eq!(forums.len(), 1);
+        assert_eq!(forums[0]["forum_id"].as_str().unwrap(), "252");
+    }
+
+    #[tokio::test]
+    async fn test_show_prints_topic_title() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("show-title");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+
+        // Seed a single topic under forum 252.
+        let topics_dir = tmp.join("forums").join("252").join("topics");
+        std::fs::create_dir_all(&topics_dir).unwrap();
+        let expected_title = "Inception (2010) — seeded";
+        let tf = rutracker_mirror::topic_io::TopicFile {
+            schema_version: 1,
+            topic_id: "6843582".into(),
+            forum_id: "252".into(),
+            title: expected_title.into(),
+            fetched_at: "2026-04-18T12:00:00+00:00".into(),
+            last_post_id: 4242,
+            last_post_at: "".into(),
+            opening_post: rutracker_mirror::topic_io::Post::default(),
+            comments: Vec::new(),
+            metadata: serde_json::Value::Null,
+        };
+        rutracker_mirror::topic_io::write_json_atomic(&topics_dir.join("6843582.json"), &tf)
+            .unwrap();
+
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_mirror_show(
+            &cfg,
+            &ShowArgs {
+                root: Some(tmp.clone()),
+                forum_id: "252".into(),
+                topic_id: "6843582".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(json["title"].as_str().unwrap(), expected_title);
+        assert_eq!(json["topic_id"].as_str().unwrap(), "6843582");
+    }
+
+    #[tokio::test]
+    async fn test_status_reports_counts_and_cooldown() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("status-counts");
+        let mut m = rutracker_mirror::Mirror::init(&tmp).unwrap();
+
+        // Seed 5 topic_index rows + a forum_state row with cooldown_until in the future.
+        let cooldown_until = (chrono::Utc::now() + chrono::Duration::seconds(59 * 60)).to_rfc3339();
+        let conn = m.state_mut().conn_mut();
+        conn.execute(
+            "INSERT INTO forum_state (forum_id, last_sync_outcome, cooldown_until) \
+             VALUES ('252', 'rate_limited', ?1)",
+            [&cooldown_until],
+        )
+        .unwrap();
+        for i in 1..=5 {
+            conn.execute(
+                "INSERT INTO topic_index (forum_id, topic_id, title, last_post_id, last_post_at, fetched_at) \
+                 VALUES ('252', ?1, 'seed', ?2, '', '')",
+                [&i.to_string(), &(1000 + i).to_string()],
+            )
+            .unwrap();
+        }
+        drop(m);
+
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_mirror_status(
+            &cfg,
+            &MirrorRootArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        let forums = json["forums"].as_array().expect("forums array");
+        assert_eq!(forums.len(), 1);
+        assert_eq!(forums[0]["topics_count"].as_i64().unwrap(), 5);
+        let remaining = forums[0]["cooldown_seconds_remaining"].as_i64().unwrap();
+        assert!(
+            remaining > 0,
+            "cooldown_seconds_remaining must be > 0, got {remaining}"
+        );
     }
 
     fn tempdir_unique(suffix: &str) -> PathBuf {

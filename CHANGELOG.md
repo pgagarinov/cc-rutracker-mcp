@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented in this file. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [1.1.0] — 2026-04-18
+
+### Added — Local mirror
+
+New `rutracker-mirror` crate and `rutracker mirror` CLI subcommand tree. The
+mirror keeps an incremental on-disk copy (`$HOME/.rutracker/mirror/`) of any
+forums you watch: one JSON per topic under `forums/<id>/topics/`, plus a
+derived SQLite (`state.db`) index that is rebuildable from the JSON layer.
+
+- `rutracker mirror init` — create mirror root + SQLite schema (v1).
+- `rutracker mirror structure` — persist `structure.json` from the live index.
+- `rutracker mirror watch add|remove|list` — edit the watchlist.
+- `rutracker mirror sync [--forum id]… [--max-topics N]` — delta-aware sync:
+  5-consecutive-older-and-known stop streak; multi-page comment merge with
+  "commit only after all pages"; atomic JSON writes (temp + sync + rename +
+  parent-dir fsync); advisory `.lock` file; 1 h cooldown on HTTP 429/503.
+- `rutracker mirror show <forum>/<topic>` — pretty-print a cached topic JSON.
+- `rutracker mirror status` — per-forum topic counts, last-sync outcomes,
+  cooldowns remaining.
+- `rutracker mirror rebuild-index` — reconstruct `state.db` from the on-disk
+  JSON layer (forward-only schema policy: older binaries refuse newer DBs).
+- `scripts/soak-mirror.sh` — release-gate 2-pass contract (initial writes
+  ≥ 6 topic files; second pass writes 0).
+
+`.mcp.json` is unchanged. MCP parity for `mirror_sync` / `mirror_status`
+is explicitly out of scope for 1.1 and deferred to a follow-up.
+
 ## [1.0.0] — 2026-04-18
 
 ### Added — Rust rewrite (clean break; no Python, no rollback)

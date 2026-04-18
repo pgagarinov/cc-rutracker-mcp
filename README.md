@@ -86,13 +86,59 @@ cargo fmt --all -- --check
 cargo test --workspace -- --ignored
 ```
 
+## Local mirror
+
+`rutracker-mirror` keeps an incremental on-disk copy of any forums you watch. The
+JSON-per-topic layer under `forums/<id>/topics/<topic_id>.json` is the source of
+truth; `state.db` (SQLite, WAL) is a derived index rebuildable from the JSONs.
+
+Layout (default root `$HOME/.rutracker/mirror/`, override via
+`RUTRACKER_MIRROR_ROOT` or `--root`):
+
+```
+$HOME/.rutracker/mirror/
+├── structure.json   — forum tree snapshot
+├── watchlist.json   — forums to sync
+├── state.db         — derived SQLite index
+└── forums/<id>/topics/<topic_id>.json
+```
+
+Bootstrap + first sync:
+
+```bash
+rutracker mirror init
+rutracker mirror structure
+rutracker mirror watch add 252
+rutracker mirror watch add 251
+rutracker mirror sync --max-topics 20
+```
+
+Re-running `rutracker mirror sync` is idempotent: steady-state passes stop after
+5 consecutive unchanged rows and rewrite only topics with a new `last_post_id`.
+On HTTP 429/503 the forum is parked for one hour (`forum_state.cooldown_until`);
+`rutracker mirror status` surfaces active cooldowns.
+
+```bash
+rutracker mirror show 252/6843582 --format text
+rutracker mirror status
+rutracker mirror rebuild-index   # reconstruct state.db from the JSON layer
+```
+
+Caveats: mirror root is APFS/ext4 only (NFS/SMB not tested). Watchlist soft-cap
+is ~100 forums. Only the latest revision of edited posts is retained — prior
+revisions are intentionally not kept (plan §5.3). Add `.rutracker/` to a
+repo-level `.gitignore` if the root lives inside a checkout.
+
+Increase log verbosity with `RUST_LOG=rutracker_mirror=debug`.
+
 ## Manual release gate
 
 ```bash
-bash scripts/soak.sh
+bash scripts/soak.sh          # parser soak: 20 random topics, asserts title+desc non-empty
+bash scripts/soak-mirror.sh   # mirror soak: 2-pass (initial >= 6 files; second pass 0 files)
 ```
 
-Fetches 20 random topic IDs, asserts each parses cleanly. Logs to `soak-<date>.log`.
+Each script logs to `soak-*-<date>.log`; commit the log with the release.
 
 ## Architecture
 
@@ -101,5 +147,6 @@ Fetches 20 random topic IDs, asserts each parses cleanly. Logs to `soak-<date>.l
 - `crates/cookies-macos` — Brave cookie AES-CBC decrypt + Keychain lookup + SQLite reader.
 - `crates/cli` — `rutracker` binary: clap subcommands, JSON/text output, path sandbox.
 - `crates/mcp` — `rutracker-mcp` binary: hand-rolled JSON-RPC stdio server.
+- `crates/mirror` — local-mirror engine: SQLite index, atomic JSON writes, delta-aware sync.
 
 Full design: [.omc/plans/full-mcp.md](.omc/plans/full-mcp.md).

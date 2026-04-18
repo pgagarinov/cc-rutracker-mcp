@@ -13,6 +13,9 @@ pub enum Error {
 
     #[error("regex compile failed: {0}")]
     Regex(#[from] regex::Error),
+
+    #[error("parser sanity check failed: {0}")]
+    ParseSanityFailed(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
