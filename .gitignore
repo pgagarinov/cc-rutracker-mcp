@@ -20,6 +20,7 @@ soak-*.log
 # ---- Agent / tooling state (user-local, not for the repo) ----
 .claude/
 .omc/artifacts/
+.omc/sessions/
 .omc/state/
 .omc/project-memory.json
 .omx/

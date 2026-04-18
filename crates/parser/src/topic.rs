@@ -10,9 +10,13 @@ pub fn parse_topic_page(html: &str) -> Result<TopicDetails> {
 
     let title_sel = Selector::parse("#topic-title").unwrap();
     let magnet_sel = Selector::parse("a.magnet-link").unwrap();
-    let size_sel = Selector::parse("span#tor-size-humn, a.dl-stub").unwrap();
-    let seed_sel = Selector::parse("span.seed b, span.seed").unwrap();
-    let leech_sel = Selector::parse("span.leech b, span.leech").unwrap();
+    // Try dedicated size span first; dl-stub label is a dead-last fallback.
+    let size_humn_sel = Selector::parse("span#tor-size-humn").unwrap();
+    let dl_stub_sel = Selector::parse("a.dl-stub").unwrap();
+    // Seeds/leeches: the inner <b> holds the number; the outer span also contains
+    // surrounding label text. Must prefer the inner <b>.
+    let seed_b_sel = Selector::parse("span.seed b, span#seed-counter b").unwrap();
+    let leech_b_sel = Selector::parse("span.leech b, span#leech-counter b").unwrap();
     let post_row_sel = Selector::parse("tbody[id^='post_']").unwrap();
     let post_body_sel = Selector::parse("div.post_body").unwrap();
     let canonical_sel = Selector::parse(r#"link[rel="canonical"]"#).unwrap();
@@ -31,19 +35,24 @@ pub fn parse_topic_page(html: &str) -> Result<TopicDetails> {
         .to_string();
 
     let size = doc
-        .select(&size_sel)
+        .select(&size_humn_sel)
         .next()
         .map(|e| e.text().collect::<String>().trim().to_string())
+        .or_else(|| {
+            doc.select(&dl_stub_sel)
+                .next()
+                .map(|e| e.text().collect::<String>().trim().to_string())
+        })
         .unwrap_or_default();
 
     let seeds = doc
-        .select(&seed_sel)
+        .select(&seed_b_sel)
         .next()
         .and_then(|e| e.text().collect::<String>().trim().parse::<u32>().ok())
         .unwrap_or(0);
 
     let leeches = doc
-        .select(&leech_sel)
+        .select(&leech_b_sel)
         .next()
         .and_then(|e| e.text().collect::<String>().trim().parse::<u32>().ok())
         .unwrap_or(0);

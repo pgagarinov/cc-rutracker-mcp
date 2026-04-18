@@ -110,7 +110,13 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cookies = load_cookies(&cli.profile).unwrap_or_default();
+    let cookies = match load_cookies(&cli.profile) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("warning: cookie load failed: {e}");
+            std::collections::HashMap::new()
+        }
+    };
     let cfg = CliConfig {
         base_url: cli.base_url.clone(),
         format: cli.format.into(),
