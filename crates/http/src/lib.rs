@@ -8,15 +8,19 @@
 use encoding_rs::WINDOWS_1251;
 use reqwest::StatusCode;
 use reqwest::{
-    header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT},
+    header::{HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, COOKIE, REFERER},
     Url,
 };
 use std::collections::HashMap;
 use thiserror::Error;
 
 pub mod urls;
+pub mod user_agents;
 
-pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (rutracker-rs)";
+const DEFAULT_ACCEPT: &str =
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
+const DEFAULT_ACCEPT_LANGUAGE: &str = "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7";
+const DEFAULT_ACCEPT_ENCODING: &str = "gzip";
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -46,19 +50,22 @@ pub struct Client {
     inner: reqwest::Client,
     base_url: Url,
     cookies: HashMap<String, String>,
+    user_agent: &'static str,
 }
 
 impl Client {
     pub fn new(base_url: &str) -> Result<Self> {
+        let user_agent = user_agents::pick_by_hour();
         let inner = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
-            .user_agent(DEFAULT_USER_AGENT)
+            .default_headers(default_headers(user_agent))
             .build()?;
         let base_url = Url::parse(base_url).map_err(|e| Error::InvalidUrl(e.to_string()))?;
         Ok(Self {
             inner,
             base_url,
             cookies: HashMap::new(),
+            user_agent,
         })
     }
 
@@ -69,6 +76,14 @@ impl Client {
 
     pub fn set_cookie(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.cookies.insert(name.into(), value.into());
+    }
+
+    pub fn user_agent(&self) -> &'static str {
+        self.user_agent
+    }
+
+    pub fn base(&self) -> &str {
+        self.base_url.as_str()
     }
 
     fn cookie_header(&self) -> Option<HeaderValue> {
@@ -85,11 +100,13 @@ impl Client {
         HeaderValue::from_str(&joined).ok()
     }
 
-    fn headers(&self) -> HeaderMap {
+    fn headers(&self, referer: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
         if let Some(cookie) = self.cookie_header() {
             h.insert(COOKIE, cookie);
+        }
+        if let Some(referer) = referer.and_then(|value| HeaderValue::from_str(value).ok()) {
+            h.insert(REFERER, referer);
         }
         h
     }
@@ -99,9 +116,23 @@ impl Client {
     /// Detects the rutracker login redirect and maps it to [`Error::LoginRequired`].
     /// Callers that want raw bytes (e.g. `dl.php`) should use [`Client::get_bytes`].
     pub async fn get_text(&self, path: &str, query: &[(&str, &str)]) -> Result<String> {
+        self.get_text_with_referer(path, query, None).await
+    }
+
+    pub async fn get_text_with_referer(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        referer: Option<&str>,
+    ) -> Result<String> {
         let url = self.build_url(path, query)?;
         tracing::debug!(%url, "GET text");
-        let resp = self.inner.get(url).headers(self.headers()).send().await?;
+        let resp = self
+            .inner
+            .get(url)
+            .headers(self.headers(referer))
+            .send()
+            .await?;
 
         let final_url = resp.url().clone();
         let status = resp.status();
@@ -122,7 +153,12 @@ impl Client {
     pub async fn get_bytes(&self, path: &str, query: &[(&str, &str)]) -> Result<Vec<u8>> {
         let url = self.build_url(path, query)?;
         tracing::debug!(%url, "GET bytes");
-        let resp = self.inner.get(url).headers(self.headers()).send().await?;
+        let resp = self
+            .inner
+            .get(url)
+            .headers(self.headers(None))
+            .send()
+            .await?;
         let status = resp.status();
         let bytes = resp.bytes().await?;
         if !status.is_success() {
@@ -154,6 +190,24 @@ fn detect_login_redirect(url: &Url, body: &[u8]) -> bool {
     let head = &body[..body.len().min(4096)];
     let head_str = std::str::from_utf8(head).unwrap_or("");
     head_str.contains(r#"id="login-form""#)
+}
+
+fn default_headers(user_agent: &'static str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static(DEFAULT_ACCEPT));
+    headers.insert(
+        ACCEPT_LANGUAGE,
+        HeaderValue::from_static(DEFAULT_ACCEPT_LANGUAGE),
+    );
+    headers.insert(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static(DEFAULT_ACCEPT_ENCODING),
+    );
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        HeaderValue::from_static(user_agent),
+    );
+    headers
 }
 
 #[cfg(test)]

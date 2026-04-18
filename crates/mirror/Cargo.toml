@@ -24,10 +24,13 @@ tracing.workspace = true
 anyhow.workspace = true
 tokio = { workspace = true, features = ["time"] }
 fs2 = "0.4"
+rand = "0.8"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
 encoding_rs.workspace = true
+regex.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock.workspace = true
+tracing-subscriber.workspace = true

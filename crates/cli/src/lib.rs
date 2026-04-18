@@ -12,7 +12,14 @@ use rutracker_parser::{
     topic::parse_topic_page, CategoryGroup, SearchPage, TopicDetails,
 };
 use serde::Serialize;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tracing::field::{Field, Visit};
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
+use tracing_subscriber::{filter, fmt, Layer, Registry};
 
 pub mod paths;
 
@@ -317,6 +324,196 @@ pub struct SyncCliArgs {
     pub forums: Vec<String>,
     pub max_topics: usize,
     pub rate_rps: f32,
+    pub max_attempts_per_forum: u32,
+    pub cooldown_wait: bool,
+    pub log_file: Option<String>,
+    /// Walk the full forum listing, ignoring stop-streak. For resuming partial bulk fetches.
+    pub force_full: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MirrorSyncResult {
+    pub output: String,
+    pub exit_code: i32,
+}
+
+#[derive(Clone)]
+struct SharedWriter {
+    inner: Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
+struct JsonVisitor {
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Rfc3339Timer;
+
+struct NdjsonLayer {
+    writer: SharedWriter,
+}
+
+impl SharedWriter {
+    fn new(writer: Box<dyn Write + Send>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(writer)),
+        }
+    }
+
+    fn write_line(&self, line: &str) {
+        if let Ok(mut writer) = self.inner.lock() {
+            let _ = writer.write_all(line.as_bytes());
+            let _ = writer.write_all(b"\n");
+            let _ = writer.flush();
+        }
+    }
+}
+
+impl Default for JsonVisitor {
+    fn default() -> Self {
+        Self {
+            fields: serde_json::Map::new(),
+        }
+    }
+}
+
+impl Visit for JsonVisitor {
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), serde_json::Value::Bool(value));
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields.insert(field.name().to_string(), value.into());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields.insert(field.name().to_string(), value.into());
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.fields.insert(
+            field.name().to_string(),
+            serde_json::Number::from_f64(value)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields.insert(
+            field.name().to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields.insert(
+            field.name().to_string(),
+            serde_json::Value::String(format!("{value:?}").trim_matches('"').to_string()),
+        );
+    }
+}
+
+impl FormatTime for Rfc3339Timer {
+    fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        write!(w, "{ts}")
+    }
+}
+
+impl NdjsonLayer {
+    fn new(writer: SharedWriter) -> Self {
+        Self { writer }
+    }
+}
+
+impl<S> Layer<S> for NdjsonLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+        let metadata = event.metadata();
+        let mut visitor = JsonVisitor::default();
+        event.record(&mut visitor);
+        visitor.fields.insert(
+            "ts".to_string(),
+            serde_json::Value::String(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+        );
+        visitor.fields.insert(
+            "level".to_string(),
+            serde_json::Value::String(metadata.level().to_string().to_lowercase()),
+        );
+        visitor.fields.insert(
+            "target".to_string(),
+            serde_json::Value::String(metadata.target().to_string()),
+        );
+        let line = serde_json::to_string(&visitor.fields).unwrap_or_else(|_| {
+            r#"{"ts":"","level":"error","event":"json_encode_failed"}"#.to_string()
+        });
+        self.writer.write_line(&line);
+    }
+}
+
+fn is_sync_target(target: &str) -> bool {
+    matches!(
+        target,
+        "rutracker_mirror::sync" | "rutracker_mirror::driver"
+    )
+}
+
+fn sync_filter() -> filter::FilterFn<impl Fn(&tracing::Metadata<'_>) -> bool + Clone> {
+    filter::filter_fn(|metadata| is_sync_target(metadata.target()))
+}
+
+fn default_sync_log_path(root: &std::path::Path) -> PathBuf {
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    root.join("logs").join(format!("sync-{ts}.log"))
+}
+
+fn resolve_log_writer(
+    root: &std::path::Path,
+    log_file: Option<&str>,
+) -> Result<Option<SharedWriter>> {
+    match log_file {
+        Some("") => Ok(None),
+        Some("-") => Ok(Some(SharedWriter::new(Box::new(io::stderr())))),
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::File::create(path)?;
+            Ok(Some(SharedWriter::new(Box::new(file))))
+        }
+        None => {
+            let path = default_sync_log_path(root);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::File::create(path)?;
+            Ok(Some(SharedWriter::new(Box::new(file))))
+        }
+    }
+}
+
+fn build_sync_dispatch(
+    root: &std::path::Path,
+    log_file: Option<&str>,
+) -> Result<tracing::Dispatch> {
+    let human_layer = fmt::layer()
+        .compact()
+        .with_ansi(false)
+        .with_timer(Rfc3339Timer)
+        .with_writer(io::stdout)
+        .with_filter(sync_filter());
+    let file_layer = resolve_log_writer(root, log_file)?
+        .map(NdjsonLayer::new)
+        .map(|layer| layer.with_filter(sync_filter()));
+    let subscriber = Registry::default().with(human_layer).with(file_layer);
+    Ok(tracing::Dispatch::new(subscriber))
 }
 
 #[derive(Debug, Clone)]
@@ -352,8 +549,10 @@ pub async fn run_mirror_structure(cfg: &CliConfig, args: &MirrorRootArgs) -> Res
     Ok(out)
 }
 
-pub async fn run_mirror_sync(cfg: &CliConfig, args: &SyncCliArgs) -> Result<String> {
+pub async fn run_mirror_sync(cfg: &CliConfig, args: &SyncCliArgs) -> Result<MirrorSyncResult> {
     let root = mirror_root(args.root.as_ref());
+    let dispatch = build_sync_dispatch(&root, args.log_file.as_deref())?;
+    let _guard = tracing::dispatcher::set_default(&dispatch);
     let client = cfg.client()?;
     let mut mirror = rutracker_mirror::Mirror::open(&root, Some(client.clone()))?;
 
@@ -368,35 +567,53 @@ pub async fn run_mirror_sync(cfg: &CliConfig, args: &SyncCliArgs) -> Result<Stri
         max_topics: args.max_topics,
         max_pages: 100,
         rate_rps: args.rate_rps,
+        max_attempts_per_forum: args.max_attempts_per_forum,
+        cooldown_wait: args.cooldown_wait,
+        force_full: args.force_full,
+        ..Default::default()
     };
 
-    let mut reports = Vec::with_capacity(forum_ids.len());
-    for forum_id in &forum_ids {
-        let mut engine = rutracker_mirror::engine::SyncEngine::new(&mut mirror, client.clone());
-        let report = engine.sync_forum(forum_id, opts.clone()).await?;
-        reports.push((forum_id.clone(), report));
-    }
+    let mut driver = rutracker_mirror::SyncDriver::new(&mut mirror, client);
+    let summary = driver.run_until_done_all(&forum_ids, opts).await?;
+    let exit_code = if summary.forums_failed.is_empty() {
+        0
+    } else {
+        1
+    };
 
     let payload = serde_json::json!({
-        "forums": reports.iter().map(|(fid, r)| serde_json::json!({
-            "forum_id": fid,
-            "files_written": r.files_written,
-            "rows_upserted": r.rows_upserted,
-            "rows_parsed": r.rows_parsed,
-            "rows_unchanged": r.rows_unchanged,
-            "forums_rate_limited": r.forums_rate_limited,
+        "forums_ok": summary.forums_ok.iter().map(|forum| serde_json::json!({
+            "forum_id": forum.forum_id,
+            "topics_count": forum.topics_count,
+            "attempts": forum.attempts,
+            "gave_up": forum.gave_up,
+        })).collect::<Vec<_>>(),
+        "forums_failed": summary.forums_failed.iter().map(|forum| serde_json::json!({
+            "forum_id": forum.forum_id,
+            "topics_count": forum.topics_count,
+            "attempts": forum.attempts,
+            "gave_up": forum.gave_up,
         })).collect::<Vec<_>>(),
     });
     let mut text = String::new();
-    for (fid, r) in &reports {
+    for forum in &summary.forums_ok {
         text.push_str(&format!(
-            "{}: parsed={} written={} unchanged={} rate_limited={}\n",
-            fid, r.rows_parsed, r.files_written, r.rows_unchanged, r.forums_rate_limited
+            "{}: topics={} attempts={} status=ok\n",
+            forum.forum_id, forum.topics_count, forum.attempts
+        ));
+    }
+    for forum in &summary.forums_failed {
+        text.push_str(&format!(
+            "{}: topics={} attempts={} status=gave_up\n",
+            forum.forum_id, forum.topics_count, forum.attempts
         ));
     }
     let out = render(cfg, &payload, &text)?;
     emit(cfg, &out).await?;
-    Ok(out)
+    Ok(MirrorSyncResult {
+        output: out,
+        exit_code,
+    })
 }
 
 pub async fn run_mirror_show(cfg: &CliConfig, args: &ShowArgs) -> Result<String> {
@@ -513,8 +730,8 @@ pub mod prelude {
         run_browse, run_categories, run_download, run_mirror_init, run_mirror_rebuild_index,
         run_mirror_show, run_mirror_status, run_mirror_structure, run_mirror_sync, run_search,
         run_topic, run_watch_add, run_watch_list, run_watch_remove, BrowseArgs, CliConfig,
-        DownloadArgs, MirrorRootArgs, OutputFormat, SearchArgs, ShowArgs, SyncCliArgs, TopicArgs,
-        WatchArgs, WatchListArgs,
+        DownloadArgs, MirrorRootArgs, MirrorSyncResult, OutputFormat, SearchArgs, ShowArgs,
+        SyncCliArgs, TopicArgs, WatchArgs, WatchListArgs,
     };
 }
 

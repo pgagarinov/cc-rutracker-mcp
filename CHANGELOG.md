@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [1.2.0] — 2026-04-18
+
+### Added — Sync automation + humanization
+
+- `rutracker mirror sync` now auto-resumes through stored cooldowns with a
+  per-forum attempt ceiling, structured progress events, and NDJSON logging.
+- New sync flags: `--max-attempts-per-forum`, `--cooldown-wait`, and
+  `--log-file`.
+- Mirror sync requests now look less bot-like via jittered pacing, referer
+  threading, reading pauses, and a realistic browser header / user-agent pool.
+
 ## [1.1.0] — 2026-04-18
 
 ### Added — Local mirror

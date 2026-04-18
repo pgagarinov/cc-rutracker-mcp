@@ -17,6 +17,7 @@
 //! that can be rebuilt from the on-disk JSONs via `Mirror::rebuild_index` (M6).
 
 pub mod config;
+pub mod driver;
 pub mod engine;
 pub mod error;
 pub mod lock;
@@ -27,5 +28,6 @@ pub mod structure;
 pub mod topic_io;
 pub mod watchlist;
 
+pub use driver::{DriverError, ForumSummary, SyncDriver, SyncSummary};
 pub use error::{Error, Result};
 pub use mirror::{default_root, Mirror, SCHEMA_VERSION};

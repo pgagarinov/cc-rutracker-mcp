@@ -1,7 +1,7 @@
 //! `rutracker` — CLI entry point. Thin clap wrapper over `rutracker-cli::prelude` handlers.
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use rutracker_cli::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -131,6 +131,16 @@ enum MirrorCmd {
         max_topics: usize,
         #[arg(long, default_value_t = 1.0)]
         rate_rps: f32,
+        #[arg(long, default_value_t = 24)]
+        max_attempts_per_forum: u32,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        cooldown_wait: bool,
+        #[arg(long)]
+        log_file: Option<String>,
+        /// Walk the full forum listing, ignoring the 5-row stop streak. Use
+        /// when resuming an interrupted initial bulk fetch.
+        #[arg(long)]
+        force_full: bool,
         #[arg(long)]
         root: Option<PathBuf>,
     },
@@ -176,14 +186,21 @@ enum WatchCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rutracker=warn".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
+    let is_sync = matches!(
+        &cli.cmd,
+        Cmd::Mirror {
+            cmd: MirrorCmd::Sync { .. }
+        }
+    );
+    if !is_sync {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "rutracker=warn".into()),
+            )
+            .init();
+    }
     let cookies = match load_cookies(&cli.profile) {
         Ok(c) => c,
         Err(e) => {
@@ -306,19 +323,37 @@ async fn main() -> Result<()> {
                 forums,
                 max_topics,
                 rate_rps,
+                max_attempts_per_forum,
+                cooldown_wait,
+                log_file,
+                force_full,
                 root,
             } => {
-                run_mirror_sync(
+                match run_mirror_sync(
                     &cfg,
                     &SyncCliArgs {
                         root,
                         forums,
                         max_topics,
                         rate_rps,
+                        max_attempts_per_forum,
+                        cooldown_wait,
+                        log_file,
+                        force_full,
                     },
                 )
                 .await
-                .context("mirror sync failed")?;
+                {
+                    Ok(result) => {
+                        if result.exit_code != 0 {
+                            std::process::exit(result.exit_code);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("{:#}", err.context("mirror sync failed"));
+                        std::process::exit(2);
+                    }
+                }
             }
             MirrorCmd::Show { target, root } => {
                 let (forum_id, topic_id) = target.split_once('/').ok_or_else(|| {

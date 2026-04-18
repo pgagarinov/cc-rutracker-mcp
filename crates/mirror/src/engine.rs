@@ -1,7 +1,7 @@
 //! `SyncEngine` — per-forum sync loop.
 //!
 //! **M4**: initial bulk fetch, `.lock` guard, forum-pass transaction boundary,
-//! 429/503 → 1 h cooldown, parser-sanity abort, `RUTRACKER_MIRROR_FAIL_AFTER_N_TOPICS`
+//! 429/503/520-526 → 1 h cooldown, parser-sanity abort, `RUTRACKER_MIRROR_FAIL_AFTER_N_TOPICS`
 //! test-only injection.
 //!
 //! **M5**: delta detection via `topic_index`, 5-consecutive-older-and-known stop-streak
@@ -11,9 +11,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
+use rand::{Rng, SeedableRng};
 use rusqlite::params;
 use rutracker_http::{urls, Client};
 use rutracker_parser::{forum_page::parse_forum_page, topic::parse_topic_page, TopicRow};
@@ -26,12 +27,29 @@ use crate::{Error, Mirror, Result};
 const COOLDOWN_SECONDS: i64 = 60 * 60;
 const STOP_STREAK: u32 = 5;
 const COMMENTS_PER_PAGE: u32 = 30;
+const TOPICS_PER_LISTING_PAGE: u32 = 50;
 
 #[derive(Debug, Clone)]
 pub struct SyncOpts {
     pub max_topics: usize,
     pub max_pages: usize,
     pub rate_rps: f32,
+    pub max_attempts_per_forum: u32,
+    pub cooldown_wait: bool,
+    pub cooldown_multiplier: f32,
+    pub min_delay_ms: u64,
+    pub max_delay_ms: u64,
+    pub pause_every_n: u32,
+    pub pause_min_secs: u64,
+    pub pause_max_secs: u64,
+    pub rng_seed: Option<u64>,
+    /// Disable the 5-consecutive-older-and-known stop streak. Useful when
+    /// resuming a partially-completed initial bulk fetch — without this, the
+    /// engine would halt at the known prefix and never reach new rows.
+    pub force_full: bool,
+    /// Delay (ms) before retrying a Cloudflare transient 5xx (520-526) once
+    /// in-request. 429/503 still immediately trip cooldown.
+    pub transient_retry_delay_ms: u64,
 }
 
 impl Default for SyncOpts {
@@ -40,6 +58,17 @@ impl Default for SyncOpts {
             max_topics: 500,
             max_pages: 100,
             rate_rps: 1.0,
+            max_attempts_per_forum: 24,
+            cooldown_wait: true,
+            cooldown_multiplier: 1.0,
+            min_delay_ms: 500,
+            max_delay_ms: 2_500,
+            pause_every_n: 20,
+            pause_min_secs: 30,
+            pause_max_secs: 60,
+            rng_seed: None,
+            force_full: false,
+            transient_retry_delay_ms: 30_000,
         }
     }
 }
@@ -71,6 +100,8 @@ impl<'a> SyncEngine<'a> {
 
     /// Sync a single forum. See module docs for phase semantics.
     pub async fn sync_forum(&mut self, forum_id: &str, opts: SyncOpts) -> Result<SyncReport> {
+        tracing::info!(target: "rutracker_mirror::sync", event = "forum_start", forum_id);
+
         let _lock = MirrorLock::acquire(self.mirror.root())?;
 
         let topics_dir = self.mirror.forum_topics_dir(forum_id);
@@ -82,6 +113,8 @@ impl<'a> SyncEngine<'a> {
         self.mirror.backfill_missing_index_rows(forum_id)?;
 
         let client = self.client.clone();
+        let mut rng = build_rng(&opts);
+        let listing_referer = forum_index_referer(&client);
         let tx = self.mirror.state_mut().conn_mut().transaction()?;
 
         tx.execute(
@@ -117,72 +150,43 @@ impl<'a> SyncEngine<'a> {
             }
         }
 
-        let html = match client
-            .get_text(
-                urls::VIEWFORUM_PHP,
-                &[
-                    ("f", forum_id),
-                    ("sort", "registered"),
-                    ("order", "desc"),
-                    ("start", "0"),
-                ],
-            )
-            .await
-        {
-            Ok(h) => h,
-            Err(rutracker_http::Error::Status(s)) if is_rate_limit(s.as_u16()) => {
-                tx.execute(
-                    "UPDATE forum_state SET last_sync_outcome='rate_limited', cooldown_until=?1 \
-                     WHERE forum_id=?2",
-                    params![cooldown_iso(), forum_id],
-                )?;
-                tx.commit()?;
-                return Ok(SyncReport {
-                    forums_rate_limited: 1,
-                    ..Default::default()
-                });
-            }
-            Err(e) => return Err(Error::Http(e)),
-        };
-
-        let listing = parse_forum_page(&html)?;
-
         let mut written = 0usize;
         let mut rows_parsed = 0usize;
         let mut rows_unchanged = 0usize;
         let mut high = hwm;
         let mut streak: u32 = 0;
+        let mut topic_writes: u32 = 0;
+        let mut pages_walked: usize = 0;
 
-        for (i, row) in listing.topics.iter().take(opts.max_topics).enumerate() {
-            rows_parsed += 1;
-            high = high.max(row.topic_id);
+        'pages: for page_idx in 0..opts.max_pages {
+            let start = (page_idx as u32) * TOPICS_PER_LISTING_PAGE;
+            let start_s = start.to_string();
 
-            let known = idx_map.get(&row.topic_id).copied();
-            let older = row.topic_id < hwm;
-
-            if older && matches!(known, Some(k) if k == row.last_post_id) {
-                rows_unchanged += 1;
-                streak += 1;
-                if streak >= STOP_STREAK {
-                    break;
-                }
-                continue;
-            }
-            streak = 0;
-
-            // Known but not-older-than-hwm and last_post_id unchanged: nothing to do.
-            if matches!(known, Some(k) if k >= row.last_post_id) {
-                rows_unchanged += 1;
-                continue;
+            if page_idx > 0 {
+                sleep_jittered(&opts, &mut rng).await;
             }
 
-            if i > 0 && opts.rate_rps > 0.0 {
-                tokio::time::sleep(Duration::from_secs_f32(1.0 / opts.rate_rps)).await;
-            }
-
-            let td = match fetch_topic_all_pages(&client, row.topic_id, opts.rate_rps).await {
-                Ok(td) => td,
+            let html = match get_with_retry(
+                &client,
+                urls::VIEWFORUM_PHP,
+                &[
+                    ("f", forum_id),
+                    ("sort", "registered"),
+                    ("order", "desc"),
+                    ("start", start_s.as_str()),
+                ],
+                Some(listing_referer.as_str()),
+                opts.transient_retry_delay_ms,
+            )
+            .await
+            {
+                Ok(h) => h,
                 Err(FetchErr::RateLimited) => {
+                    tracing::info!(
+                        target: "rutracker_mirror::sync",
+                        event = "rate_limit_sleep",
+                        forum_id
+                    );
                     tx.execute(
                         "UPDATE forum_state SET last_sync_outcome='rate_limited', cooldown_until=?1 \
                          WHERE forum_id=?2",
@@ -201,33 +205,159 @@ impl<'a> SyncEngine<'a> {
                 Err(FetchErr::Other(e)) => return Err(e),
             };
 
-            let path = topics_dir.join(format!("{}.json", row.topic_id));
-            let existing = read_topic_file(&path).ok();
-            let file = build_topic_file(forum_id, row, &td, existing);
-            topic_io::write_json_atomic(&path, &file)?;
+            let listing = match parse_forum_page(&html) {
+                Ok(l) => l,
+                Err(rutracker_parser::Error::ParseSanityFailed(_)) if page_idx > 0 => {
+                    // Legitimate end-of-listing: forum has exactly N*50 topics and the
+                    // (N+1)-th page renders the forum UI with an empty tbody, which the
+                    // parser flags as sanity-failed. On page-2+ we treat that as end of
+                    // forum; sanity is only hard-fail on page 1 (where a broken parser
+                    // is the real concern — see §11 scenario 3).
+                    break 'pages;
+                }
+                Err(e) => return Err(Error::Parser(e)),
+            };
+            if listing.topics.is_empty() {
+                // End of forum listing.
+                break 'pages;
+            }
+            let page_len = listing.topics.len();
+            let page_known = listing
+                .topics
+                .iter()
+                .filter(|row| idx_map.contains_key(&row.topic_id))
+                .count();
+            let page_new = page_len.saturating_sub(page_known);
+            pages_walked += 1;
+            tracing::info!(
+                target: "rutracker_mirror::sync",
+                event = "page_parsed",
+                forum_id,
+                page = page_idx + 1,
+                rows = page_len,
+                new = page_new,
+                known = page_known
+            );
 
-            tx.execute(
-                "INSERT INTO topic_index \
-                 (forum_id, topic_id, title, last_post_id, last_post_at, fetched_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT(forum_id, topic_id) DO UPDATE SET \
-                   title = excluded.title, \
-                   last_post_id = excluded.last_post_id, \
-                   last_post_at = excluded.last_post_at, \
-                   fetched_at = excluded.fetched_at",
-                params![
+            for (i, row) in listing.topics.iter().enumerate() {
+                if rows_parsed >= opts.max_topics {
+                    break 'pages;
+                }
+                rows_parsed += 1;
+                high = high.max(row.topic_id);
+
+                let known = idx_map.get(&row.topic_id).copied();
+                let older = row.topic_id < hwm;
+
+                if older && matches!(known, Some(k) if k == row.last_post_id) {
+                    rows_unchanged += 1;
+                    streak += 1;
+                    if !opts.force_full && streak >= STOP_STREAK {
+                        break 'pages;
+                    }
+                    continue;
+                }
+                streak = 0;
+
+                // Known but not-older-than-hwm and last_post_id unchanged: nothing to do.
+                if matches!(known, Some(k) if k >= row.last_post_id) {
+                    rows_unchanged += 1;
+                    continue;
+                }
+
+                if page_idx > 0 || i > 0 {
+                    sleep_jittered(&opts, &mut rng).await;
+                }
+
+                let td = match fetch_topic_all_pages(
+                    &client,
                     forum_id,
-                    row.topic_id.to_string(),
-                    file.title,
-                    file.last_post_id.to_string(),
-                    file.last_post_at,
-                    file.fetched_at,
-                ],
-            )?;
+                    row.topic_id,
+                    &opts,
+                    &mut rng,
+                )
+                .await
+                {
+                    Ok(td) => td,
+                    Err(FetchErr::RateLimited) => {
+                        tracing::info!(
+                            target: "rutracker_mirror::sync",
+                            event = "rate_limit_sleep",
+                            forum_id
+                        );
+                        tx.execute(
+                            "UPDATE forum_state SET last_sync_outcome='rate_limited', cooldown_until=?1 \
+                             WHERE forum_id=?2",
+                            params![cooldown_iso(), forum_id],
+                        )?;
+                        tx.commit()?;
+                        return Ok(SyncReport {
+                            files_written: written,
+                            rows_upserted: written,
+                            rows_parsed,
+                            rows_unchanged,
+                            forums_rate_limited: 1,
+                            ..Default::default()
+                        });
+                    }
+                    Err(FetchErr::Other(e)) => return Err(e),
+                };
 
-            written += 1;
-            idx_map.insert(row.topic_id, file.last_post_id);
-            maybe_inject_panic(written);
+                let path = topics_dir.join(format!("{}.json", row.topic_id));
+                let existing = read_topic_file(&path).ok();
+                let file = build_topic_file(forum_id, row, &td, existing);
+                topic_io::write_json_atomic(&path, &file)?;
+
+                tx.execute(
+                    "INSERT INTO topic_index \
+                     (forum_id, topic_id, title, last_post_id, last_post_at, fetched_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                     ON CONFLICT(forum_id, topic_id) DO UPDATE SET \
+                       title = excluded.title, \
+                       last_post_id = excluded.last_post_id, \
+                       last_post_at = excluded.last_post_at, \
+                       fetched_at = excluded.fetched_at",
+                    params![
+                        forum_id,
+                        row.topic_id.to_string(),
+                        file.title,
+                        file.last_post_id.to_string(),
+                        file.last_post_at,
+                        file.fetched_at,
+                    ],
+                )?;
+
+                written += 1;
+                topic_writes += 1;
+                idx_map.insert(row.topic_id, file.last_post_id);
+                tracing::info!(
+                    target: "rutracker_mirror::sync",
+                    event = "topic_fetched",
+                    forum_id,
+                    topic_id = row.topic_id,
+                    title = row.title.as_str()
+                );
+                if opts.pause_every_n > 0
+                    && topic_writes > 0
+                    && topic_writes % opts.pause_every_n == 0
+                {
+                    let pause_ms = next_pause_ms(&opts, &mut rng);
+                    if pause_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(pause_ms)).await;
+                    }
+                    tracing::info!(
+                        target: "rutracker_mirror::sync",
+                        event = "reading_pause",
+                        slept_secs = pause_ms as f64 / 1000.0
+                    );
+                }
+                maybe_inject_panic(written);
+            }
+
+            // Short page = last page.
+            if page_len < TOPICS_PER_LISTING_PAGE as usize {
+                break 'pages;
+            }
         }
 
         let topics_count: i64 = tx.query_row(
@@ -250,6 +380,14 @@ impl<'a> SyncEngine<'a> {
         )?;
         tx.commit()?;
 
+        tracing::info!(
+            target: "rutracker_mirror::sync",
+            event = "forum_complete",
+            forum_id,
+            topics_count,
+            pages_walked
+        );
+
         Ok(SyncReport {
             files_written: written,
             rows_upserted: written,
@@ -267,22 +405,35 @@ impl<'a> SyncEngine<'a> {
 /// all pages").
 async fn fetch_topic_all_pages(
     client: &Client,
+    forum_id: &str,
     topic_id: u64,
-    rate_rps: f32,
+    opts: &SyncOpts,
+    rng: &mut impl Rng,
 ) -> std::result::Result<rutracker_parser::TopicDetails, FetchErr> {
     let tid = topic_id.to_string();
-    let html = client_get(client, &[("t", tid.as_str())]).await?;
+    let forum_referer = forum_referer(client, forum_id);
+    let topic_referer = topic_referer(client, topic_id);
+    let html = client_get(
+        client,
+        &[("t", tid.as_str())],
+        Some(forum_referer.as_str()),
+        opts.transient_retry_delay_ms,
+    )
+    .await?;
     let mut td = parse_topic_page(&html).map_err(|e| FetchErr::Other(Error::Parser(e)))?;
 
     let total = td.comment_pages_total;
     if total > 1 {
         for page in 1..total {
-            if rate_rps > 0.0 {
-                tokio::time::sleep(Duration::from_secs_f32(1.0 / rate_rps)).await;
-            }
+            sleep_jittered(opts, rng).await;
             let start = (page * COMMENTS_PER_PAGE).to_string();
-            let html =
-                client_get(client, &[("t", tid.as_str()), ("start", start.as_str())]).await?;
+            let html = client_get(
+                client,
+                &[("t", tid.as_str()), ("start", start.as_str())],
+                Some(topic_referer.as_str()),
+                opts.transient_retry_delay_ms,
+            )
+            .await?;
             let next = parse_topic_page(&html).map_err(|e| FetchErr::Other(Error::Parser(e)))?;
             td.comments.extend(next.comments);
             td.comment_pages_fetched += 1;
@@ -294,9 +445,44 @@ async fn fetch_topic_all_pages(
 async fn client_get(
     client: &Client,
     params: &[(&str, &str)],
+    referer: Option<&str>,
+    retry_delay_ms: u64,
 ) -> std::result::Result<String, FetchErr> {
-    match client.get_text(urls::VIEWTOPIC_PHP, params).await {
+    client_get_retry(client, urls::VIEWTOPIC_PHP, params, referer, retry_delay_ms).await
+}
+
+/// GET with a single inline retry for Cloudflare transient 5xx (520–526).
+/// 429/503 immediately return `RateLimited` (those are explicit rate-limit
+/// signals, not edge glitches). After the one retry, any rate-limit status
+/// also maps to `RateLimited` (the caller commits cooldown).
+async fn client_get_retry(
+    client: &Client,
+    url: &str,
+    params: &[(&str, &str)],
+    referer: Option<&str>,
+    retry_delay_ms: u64,
+) -> std::result::Result<String, FetchErr> {
+    match client.get_text_with_referer(url, params, referer).await {
         Ok(h) => Ok(h),
+        Err(rutracker_http::Error::Status(s)) if is_cloudflare_transient(s.as_u16()) => {
+            tracing::info!(
+                target: "rutracker_mirror::sync",
+                event = "cloudflare_retry",
+                url,
+                status = s.as_u16(),
+                retry_in_ms = retry_delay_ms
+            );
+            if retry_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+            }
+            match client.get_text_with_referer(url, params, referer).await {
+                Ok(h) => Ok(h),
+                Err(rutracker_http::Error::Status(s)) if is_rate_limit(s.as_u16()) => {
+                    Err(FetchErr::RateLimited)
+                }
+                Err(e) => Err(FetchErr::Other(Error::Http(e))),
+            }
+        }
         Err(rutracker_http::Error::Status(s)) if is_rate_limit(s.as_u16()) => {
             Err(FetchErr::RateLimited)
         }
@@ -304,8 +490,96 @@ async fn client_get(
     }
 }
 
+async fn get_with_retry(
+    client: &Client,
+    url: &str,
+    params: &[(&str, &str)],
+    referer: Option<&str>,
+    retry_delay_ms: u64,
+) -> std::result::Result<String, FetchErr> {
+    client_get_retry(client, url, params, referer, retry_delay_ms).await
+}
+
+fn build_rng(opts: &SyncOpts) -> rand::rngs::StdRng {
+    let seed = opts.rng_seed.unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
+    });
+    rand::rngs::StdRng::seed_from_u64(seed)
+}
+
+fn next_delay_ms(opts: &SyncOpts, rng: &mut impl Rng) -> u64 {
+    if opts.min_delay_ms == 0 && opts.max_delay_ms == 0 {
+        if opts.rate_rps <= 0.0 {
+            0
+        } else {
+            (1000.0 / opts.rate_rps) as u64
+        }
+    } else {
+        rand::Rng::gen_range(
+            rng,
+            opts.min_delay_ms..=opts.max_delay_ms.max(opts.min_delay_ms),
+        )
+    }
+}
+
+fn next_pause_ms(opts: &SyncOpts, rng: &mut impl Rng) -> u64 {
+    let min_ms = opts.pause_min_secs.saturating_mul(1000);
+    let max_ms = opts.pause_max_secs.saturating_mul(1000).max(min_ms);
+    if min_ms == 0 && max_ms == 0 {
+        0
+    } else {
+        rand::Rng::gen_range(rng, min_ms..=max_ms)
+    }
+}
+
+async fn sleep_jittered(opts: &SyncOpts, rng: &mut impl Rng) {
+    let ms = next_delay_ms(opts, rng);
+    if ms > 0 {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+}
+
+fn forum_root(client: &Client) -> String {
+    let trimmed = client.base().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/forum")
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn forum_index_referer(client: &Client) -> String {
+    format!("{}/forum/{}", forum_root(client), urls::INDEX_PHP)
+}
+
+fn forum_referer(client: &Client, forum_id: &str) -> String {
+    format!(
+        "{}/forum/{}?f={forum_id}",
+        forum_root(client),
+        urls::VIEWFORUM_PHP
+    )
+}
+
+fn topic_referer(client: &Client, topic_id: u64) -> String {
+    format!(
+        "{}/forum/{}?t={topic_id}",
+        forum_root(client),
+        urls::VIEWTOPIC_PHP
+    )
+}
+
 fn is_rate_limit(code: u16) -> bool {
-    matches!(code, 429 | 503)
+    // 429 Too Many Requests, 503 Service Unavailable — per plan §5.2/§5.4.
+    // Cloudflare origin-reachability 5xx (520–526) also map to cooldown after an
+    // inline retry fails: they are transient edge-layer errors observed in live
+    // rutracker sync runs.
+    matches!(code, 429 | 503 | 520..=526)
+}
+
+fn is_cloudflare_transient(code: u16) -> bool {
+    matches!(code, 520..=526)
 }
 
 fn cooldown_iso() -> String {
@@ -426,16 +700,57 @@ mod tests {
     use crate::lock::MirrorLock;
     use crate::topic_io::TopicFile;
     use chrono::DateTime;
+    use rand::SeedableRng;
     use std::fmt::Write as _;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+    use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     // Serialises every test that runs `sync_forum` (or the panic-injection variants).
     // `RUTRACKER_MIRROR_FAIL_AFTER_N_TOPICS` is process-global; letting tests run in
     // parallel would leak the injected panic threshold across them.
     static SYNC_SERIAL: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Default)]
+    struct EventCaptureLayer {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Default)]
+    struct EventFieldVisitor {
+        event: Option<String>,
+    }
+
+    impl Visit for EventFieldVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "event" {
+                self.event = Some(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "event" {
+                self.event = Some(format!("{value:?}").trim_matches('"').to_string());
+            }
+        }
+    }
+
+    impl<S> Layer<S> for EventCaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = EventFieldVisitor::default();
+            event.record(&mut visitor);
+            if let Some(name) = visitor.event {
+                self.events.lock().unwrap().push(name);
+            }
+        }
+    }
 
     fn build_forum_listing_html(forum_id: &str, rows: &[(u64, u64)]) -> String {
         // rows: Vec<(topic_id, last_post_id)>
@@ -589,6 +904,15 @@ mod tests {
             .await;
     }
 
+    async fn stub_status(server: &MockServer, forum_id: &str, status: u16) {
+        Mock::given(method("GET"))
+            .and(path("/forum/viewforum.php"))
+            .and(query_param("f", forum_id))
+            .respond_with(ResponseTemplate::new(status).set_body_string("cloudflare"))
+            .mount(server)
+            .await;
+    }
+
     async fn stub_all_topics(server: &MockServer, topic_ids: &[u64]) {
         for tid in topic_ids {
             let body = build_topic_html(*tid);
@@ -605,7 +929,18 @@ mod tests {
         SyncOpts {
             max_topics,
             max_pages: 100,
-            rate_rps: 1000.0,
+            rate_rps: 0.0,
+            max_attempts_per_forum: 24,
+            cooldown_wait: true,
+            cooldown_multiplier: 1.0,
+            min_delay_ms: 0,
+            max_delay_ms: 0,
+            pause_every_n: 0,
+            pause_min_secs: 0,
+            pause_max_secs: 0,
+            rng_seed: Some(7),
+            force_full: false,
+            transient_retry_delay_ms: 0,
         }
     }
 
@@ -798,6 +1133,221 @@ mod tests {
             (59 * 60..=61 * 60).contains(&delta),
             "cooldown must fall in [59m, 61m], got {delta}s"
         );
+    }
+
+    async fn stub_cloudflare_then_ok(
+        server: &MockServer,
+        forum_id: &str,
+        topic_ids: &[u64],
+        cf_status: u16,
+    ) {
+        // First call to /forum/viewforum.php → Cloudflare transient; then 200 listing.
+        Mock::given(method("GET"))
+            .and(path("/forum/viewforum.php"))
+            .and(query_param("f", forum_id))
+            .respond_with(ResponseTemplate::new(cf_status).set_body_string("cf-transient"))
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+        stub_forum_listing(server, forum_id, topic_ids).await;
+    }
+
+    async fn stub_listing_page(server: &MockServer, forum_id: &str, start: u32, topic_ids: &[u64]) {
+        let body = simple_listing(forum_id, topic_ids);
+        Mock::given(method("GET"))
+            .and(path("/forum/viewforum.php"))
+            .and(query_param("f", forum_id))
+            .and(query_param("start", start.to_string().as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_forum_listing_pagination_walks_all_pages() {
+        // RED: a forum with 150 topics split across 3 listing pages (0, 50, 100).
+        // The engine must walk all 3 pages and download every topic.
+        let _serial = SYNC_SERIAL.lock().unwrap();
+        let server = MockServer::start().await;
+        let page1: Vec<u64> = (9_000_001..=9_000_050).collect();
+        let page2: Vec<u64> = (9_000_051..=9_000_100).collect();
+        let page3: Vec<u64> = (9_000_101..=9_000_150).collect();
+
+        stub_listing_page(&server, "252", 0, &page1).await;
+        stub_listing_page(&server, "252", 50, &page2).await;
+        stub_listing_page(&server, "252", 100, &page3).await;
+        // Page 4 (start=150): empty → signals end of listing.
+        Mock::given(method("GET"))
+            .and(path("/forum/viewforum.php"))
+            .and(query_param("f", "252"))
+            .and(query_param("start", "150"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(build_empty_forum_listing_html("252")),
+            )
+            .mount(&server)
+            .await;
+
+        let all_ids: Vec<u64> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .copied()
+            .collect();
+        stub_all_topics(&server, &all_ids).await;
+
+        let td = TempDir::new().unwrap();
+        let mut m = Mirror::init(td.path()).unwrap();
+        let client = make_client(&server);
+        let mut engine = SyncEngine::new(&mut m, client);
+
+        let report = engine.sync_forum("252", fast_opts(500)).await.unwrap();
+        assert_eq!(
+            report.rows_parsed, 150,
+            "engine must walk all 3 listing pages"
+        );
+        assert_eq!(report.files_written, 150);
+    }
+
+    #[tokio::test]
+    async fn test_forum_listing_pagination_respects_max_pages_cap() {
+        // Safety rail: `max_pages` bounds the walk even if the forum keeps
+        // returning full pages. 2-page cap over 4 available pages → 100 rows.
+        let _serial = SYNC_SERIAL.lock().unwrap();
+        let server = MockServer::start().await;
+        let page1: Vec<u64> = (9_100_001..=9_100_050).collect();
+        let page2: Vec<u64> = (9_100_051..=9_100_100).collect();
+        let page3: Vec<u64> = (9_100_101..=9_100_150).collect();
+        let page4: Vec<u64> = (9_100_151..=9_100_200).collect();
+
+        stub_listing_page(&server, "252", 0, &page1).await;
+        stub_listing_page(&server, "252", 50, &page2).await;
+        stub_listing_page(&server, "252", 100, &page3).await;
+        stub_listing_page(&server, "252", 150, &page4).await;
+
+        let mut seen: Vec<u64> = Vec::new();
+        seen.extend(&page1);
+        seen.extend(&page2);
+        seen.extend(&page3);
+        seen.extend(&page4);
+        stub_all_topics(&server, &seen).await;
+
+        let td = TempDir::new().unwrap();
+        let mut m = Mirror::init(td.path()).unwrap();
+        let client = make_client(&server);
+        let mut engine = SyncEngine::new(&mut m, client);
+
+        let opts = SyncOpts {
+            max_pages: 2,
+            ..fast_opts(500)
+        };
+        let report = engine.sync_forum("252", opts).await.unwrap();
+        assert_eq!(
+            report.rows_parsed, 100,
+            "max_pages=2 caps the walk at 2 listing pages (100 rows)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cloudflare_520_retry_then_success() {
+        // RED: a single 520 on the listing page should NOT hard-cooldown;
+        // inline retry (one attempt) should recover and sync normally.
+        let _serial = SYNC_SERIAL.lock().unwrap();
+        let server = MockServer::start().await;
+        let topic_ids: Vec<u64> = (7_000_001..=7_000_005).collect();
+        stub_cloudflare_then_ok(&server, "252", &topic_ids, 520).await;
+        stub_all_topics(&server, &topic_ids).await;
+
+        let td = TempDir::new().unwrap();
+        let mut m = Mirror::init(td.path()).unwrap();
+        let client = make_client(&server);
+        let mut engine = SyncEngine::new(&mut m, client);
+        let opts = SyncOpts {
+            transient_retry_delay_ms: 5,
+            ..fast_opts(5)
+        };
+
+        let report = engine.sync_forum("252", opts).await.unwrap();
+        assert_eq!(
+            report.forums_rate_limited, 0,
+            "inline retry must not flip cooldown"
+        );
+        assert_eq!(report.files_written, 5);
+    }
+
+    #[tokio::test]
+    async fn test_force_full_bypasses_stop_streak() {
+        // RED: stop-streak (5 known-unchanged rows) normally halts a forum pass early.
+        // With `force_full = true`, the engine must walk the full listing regardless.
+        let _serial = SYNC_SERIAL.lock().unwrap();
+        let server = MockServer::start().await;
+        let topic_ids: Vec<u64> = (8_000_001..=8_000_010).collect();
+        stub_forum_listing(&server, "252", &topic_ids).await;
+        stub_all_topics(&server, &topic_ids).await;
+
+        let td = TempDir::new().unwrap();
+        let mut m = Mirror::init(td.path()).unwrap();
+        let client = make_client(&server);
+        let mut engine = SyncEngine::new(&mut m, client);
+
+        // Seed: first pass to populate topic_index + hwm.
+        let first = engine.sync_forum("252", fast_opts(10)).await.unwrap();
+        assert_eq!(first.files_written, 10);
+
+        // Without force_full: all rows older-and-known-unchanged → stop after 5, rows_parsed should be ≤ 5.
+        let normal = engine.sync_forum("252", fast_opts(10)).await.unwrap();
+        assert!(
+            normal.rows_parsed <= 5,
+            "stop-streak should halt after 5 known rows (got {})",
+            normal.rows_parsed
+        );
+
+        // With force_full: walks all rows, rows_parsed == 10.
+        let forced = engine
+            .sync_forum(
+                "252",
+                SyncOpts {
+                    force_full: true,
+                    ..fast_opts(10)
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(forced.rows_parsed, 10, "force_full must bypass stop-streak");
+    }
+
+    #[tokio::test]
+    async fn test_cloudflare_5xx_marks_cooldown_and_aborts() {
+        for status in [520u16, 521, 522, 523, 524, 525, 526] {
+            let _serial = SYNC_SERIAL.lock().unwrap();
+            let server = MockServer::start().await;
+            stub_status(&server, "252", status).await;
+
+            let td = TempDir::new().unwrap();
+            let mut m = Mirror::init(td.path()).unwrap();
+            let client = make_client(&server);
+            let mut engine = SyncEngine::new(&mut m, client);
+
+            let report = engine
+                .sync_forum("252", fast_opts(10))
+                .await
+                .unwrap_or_else(|e| panic!("status {status} should cooldown, got error: {e}"));
+            assert_eq!(
+                report.forums_rate_limited, 1,
+                "status {status} must mark as rate-limited"
+            );
+            assert_eq!(report.files_written, 0);
+
+            let outcome: String = m
+                .state()
+                .conn()
+                .query_row(
+                    "SELECT last_sync_outcome FROM forum_state WHERE forum_id='252'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(outcome, "rate_limited", "status {status} → rate_limited");
+        }
     }
 
     #[tokio::test]
@@ -1179,6 +1729,108 @@ mod tests {
         assert_eq!(
             report.rows_unchanged, 1,
             "1 short-circuit trigger (the older+known row)"
+        );
+    }
+
+    #[test]
+    fn test_jittered_delay_is_nonuniform() {
+        let opts = SyncOpts {
+            min_delay_ms: 100,
+            max_delay_ms: 500,
+            rng_seed: Some(42),
+            ..fast_opts(10)
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(opts.rng_seed.unwrap());
+        let delays: Vec<u64> = (0..10).map(|_| next_delay_ms(&opts, &mut rng)).collect();
+
+        assert!(delays.iter().all(|ms| (100..=500).contains(ms)));
+        let distinct: std::collections::BTreeSet<u64> = delays.iter().copied().collect();
+        assert!(
+            distinct.len() >= 2,
+            "expected at least 2 distinct jitter values, got {delays:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_referer_set_on_topic_fetch() {
+        let _serial = SYNC_SERIAL.lock().unwrap();
+        let server = MockServer::start().await;
+        let topic_id = 6_252_001u64;
+        let expected_referer = format!("{}/forum/viewforum.php?f=252", server.uri());
+
+        stub_forum_listing(&server, "252", &[topic_id]).await;
+        Mock::given(method("GET"))
+            .and(path("/forum/viewtopic.php"))
+            .and(query_param("t", topic_id.to_string().as_str()))
+            .and(header("referer", expected_referer.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_string(build_topic_html(topic_id)))
+            .mount(&server)
+            .await;
+
+        let td = TempDir::new().unwrap();
+        let mut m = Mirror::init(td.path()).unwrap();
+        let mut engine = SyncEngine::new(&mut m, make_client(&server));
+        let report = engine.sync_forum("252", fast_opts(1)).await.unwrap();
+        assert_eq!(report.files_written, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_reading_pause_every_n_topics() {
+        let _serial = SYNC_SERIAL.lock().unwrap();
+        let server = MockServer::start().await;
+        let topic_ids: Vec<u64> = (6_300_001..=6_300_009).collect();
+        stub_forum_listing(&server, "252", &topic_ids).await;
+        stub_all_topics(&server, &topic_ids).await;
+
+        let td = TempDir::new().unwrap();
+        let mut m = Mirror::init(td.path()).unwrap();
+        let mut engine = SyncEngine::new(&mut m, make_client(&server));
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(EventCaptureLayer {
+            events: events.clone(),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let report = engine
+            .sync_forum(
+                "252",
+                SyncOpts {
+                    pause_every_n: 3,
+                    pause_min_secs: 0,
+                    pause_max_secs: 0,
+                    ..fast_opts(9)
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.files_written, 9);
+        let reading_pause_count = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.as_str() == "reading_pause")
+            .count();
+        assert_eq!(reading_pause_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_rate_rps_still_works() {
+        let opts = SyncOpts {
+            rate_rps: 10.0,
+            min_delay_ms: 0,
+            max_delay_ms: 0,
+            ..fast_opts(1)
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let start = tokio::time::Instant::now();
+        sleep_jittered(&opts, &mut rng).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            (80..=120).contains(&(elapsed.as_millis() as u64)),
+            "expected ~100ms legacy delay, got {elapsed:?}"
         );
     }
 }

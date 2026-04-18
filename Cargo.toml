@@ -34,7 +34,7 @@ serde_json = "1"
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 # SQLite (cookies-macos + mirror crates)
 rusqlite = { version = "0.32", features = ["bundled"] }

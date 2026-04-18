@@ -118,7 +118,24 @@ Re-running `rutracker mirror sync` is idempotent: steady-state passes stop after
 On HTTP 429/503 the forum is parked for one hour (`forum_state.cooldown_until`);
 `rutracker mirror status` surfaces active cooldowns.
 
+### Sync automation flags
+
+`rutracker mirror sync` now auto-resumes through cooldowns instead of forcing a
+manual rerun after every 429/503 cycle.
+
+- `--max-attempts-per-forum 24` caps retry loops per forum before the run marks
+  that forum as `gave_up` and exits non-zero.
+- `--cooldown-wait=true` keeps the process alive until the stored cooldown
+  expires; `--cooldown-wait=false` preserves the old "stop on first rate-limit"
+  behavior for CI or tight smoke tests.
+- `--log-file PATH` writes NDJSON progress events. Omit it to use
+  `<mirror-root>/logs/sync-<YYYYMMDD-HHMMSS>.log`, pass `-` for stderr, or pass
+  an empty string to disable file logging entirely.
+
 ```bash
+rutracker mirror sync --forum 252 --max-attempts-per-forum 24
+rutracker mirror sync --forum 252 --cooldown-wait=false
+rutracker mirror sync --forum 252 --log-file -
 rutracker mirror show 252/6843582 --format text
 rutracker mirror status
 rutracker mirror rebuild-index   # reconstruct state.db from the JSON layer
