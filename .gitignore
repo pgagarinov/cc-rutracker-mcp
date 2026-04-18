@@ -1,16 +1,45 @@
-# Pixi environments
-.pixi/*
-!.pixi/config.toml
+# ---- Rust ----
+/target
+**/*.rs.bk
+*.pdb
 
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
+# Benchmark / Criterion output
+/target/criterion/
+
+# ---- Project-specific ----
 
 # Cached cookies (contains session tokens)
 .cookies.json
 
-# OS
+# Categories cache (forum directory)
+.categories.json
+
+# Release-gate soak logs
+soak-*.log
+
+# ---- Agent / tooling state (user-local, not for the repo) ----
+.claude/
+.omc/artifacts/
+.omc/state/
+.omc/project-memory.json
+.omx/
+
+# ---- Editor / IDE ----
+/.idea/
+/.vscode/
+*.iml
+.fleet/
+
+# ---- Vim / Emacs swap ----
+*.swp
+*.swo
+*~
+
+# ---- OS ----
 .DS_Store
+Thumbs.db
+
+# ---- Env / secrets (belt & braces — this project has none, but keep anyway) ----
+.env
+.env.*
+!.env.example

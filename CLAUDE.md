@@ -1,52 +1,47 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
 ## Project Overview
 
-MCP (Model Context Protocol) server for RuTracker integration. Lets Claude search and browse rutracker.org using auth cookies from the Brave browser. Python 3.11+.
+Rust workspace with 5 crates and 2 binaries. `rutracker` is a composable CLI; `rutracker-mcp` is an MCP stdio server for Claude Code. Both wrap the same parser/HTTP/cookies core.
 
-## Development Environment
-
-Uses **Pixi** (conda-based) for environment management and **Hatchling** as the build backend.
+## Development
 
 ```bash
-# Set up environment (installs dependencies + package in editable mode)
-pixi install
+# Build + test
+cargo build --release
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 
-# Run the MCP server
-pixi run serve
+# Install both binaries
+cargo install --path crates/cli --locked
+cargo install --path crates/mcp --locked
 ```
 
 ## Architecture
 
 ```
-src/rutracker_mcp/
-    __init__.py      # re-exports main()
-    __main__.py      # python -m entry point
-    server.py        # FastMCP server, tool definitions, lifespan
-    cookies.py       # Brave profile resolution + pycookiecheat extraction
-    client.py        # Async httpx client for rutracker.org
-    parser.py        # BeautifulSoup HTML parsing (search results, topic pages)
+crates/
+  parser/          pure HTML parsing (scraper + encoding_rs) — no I/O
+    src/search.rs       tracker.php rows
+    src/topic.rs        viewtopic.php (opening post + comments)
+    src/metadata.rs     label/value extraction from post_body
+    src/forum_index.rs  index.php categories + subforums
+    src/text_format.rs  shared Display impls for CLI text mode + MCP tool output
+  http/            reqwest async client, cp1251 decoding, login-redirect recovery
+  cookies-macos/   Brave AES-128-CBC decrypt + Keychain lookup (security-framework)
+  cli/             `rutracker` binary — clap subcommands, JSON default, path sandbox
+  mcp/             `rutracker-mcp` binary — hand-rolled JSON-RPC stdio server, 5 tools
 ```
 
-- `server.py` — FastMCP server with lifespan pattern; defines `search` and `get_topic` tools
-- `cookies.py` — reads cookies from Brave profile "Peter" via pycookiecheat; caches to `.cookies.json`
-- `client.py` — async httpx wrapper handling cp1251 encoding and login detection
-- `parser.py` — BeautifulSoup parsers for tracker.php and viewtopic.php pages
+Library-level tests live in each crate and use `wiremock` + HTML fixtures. Live Keychain / live network tests are `#[ignore]`-marked; run them with `cargo test -- --ignored`.
 
-## Key Dependencies
+## Cookies
 
-`mcp`, `httpx`, `beautifulsoup4`, `lxml`, `pycookiecheat`
-
-## Configuration
-
-- Platform target: osx-arm64, conda-forge channel
-- Brave profile: "Peter" (Profile 2) — must have an active rutracker.org session
-- RuTracker pages use cp1251 encoding
-- Cookies are cached in `.cookies.json` (gitignored) to avoid repeated Keychain prompts
-- On login redirect, cookies are auto-refreshed from Brave (one-time Keychain prompt)
+First run prompts macOS Keychain for "Brave Safe Storage" access. Decrypted cookies cached to `.cookies.json` (gitignored). `bb_dl_key` required for `.torrent` downloads.
 
 ## MCP Setup
 
-The `.mcp.json` in the project root configures Claude Code to use this server automatically when working in this directory.
+`.mcp.json` points at the installed `rutracker-mcp` binary. No extra configuration.

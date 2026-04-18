@@ -1,0 +1,28 @@
+[package]
+name = "rutracker-cookies-macos"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aes.workspace = true
+cbc.workspace = true
+pbkdf2.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+security-framework = "3"
+dirs = "5"
+
+[dev-dependencies]
+pretty_assertions.workspace = true

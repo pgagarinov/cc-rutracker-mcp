@@ -1,0 +1,133 @@
+{
+  "project": "rutracker-mcp full-scope expansion plan",
+  "task_kind": "planning_deliverable",
+  "summary": "Author .omc/plans/full-mcp.md — a complete implementation plan for expanding the RuTracker MCP from 2 tools (search, get_topic) to a feature-complete server covering comments, structured metadata, browsing, listing categories, pagination, filters, .torrent download, typed dataclasses, and tests. Plan must be Codex-critic-approved.",
+  "deliverable_paths": [
+    ".omc/plans/full-mcp.md",
+    ".omc/prd.json"
+  ],
+  "out_of_scope": [
+    "Implementing the plan (this run produces the plan only)",
+    "Write operations on rutracker (post, vote, comment)",
+    "Cross-platform cookie support beyond current Brave-on-macOS"
+  ],
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "Plan covers comment extraction with pagination",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan names the exact selector tbody[id^='post_'] for posts and div.post_body for body content (verified against .omc/research/topic-sample.html which contains 30 such posts)",
+        "Plan specifies how to extract per-comment author (p.nick), date (a.small or similar), and body text",
+        "Plan describes topic-page pagination strategy: detect a.pg links, follow start= query param, cap pages with a max_pages parameter (default given)",
+        "Plan defines the new TopicDetails.comments field shape (list[Comment] dataclass with author, date, text, post_id) and the new MCP tool signature get_topic(topic_id, include_comments: bool = False, max_comment_pages: int = 1)"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Plan covers structured metadata parsing from first post",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan lists the structured fields to extract: imdb_rating, kinopoisk_rating, year, country, genre, director, cast, duration, release_type, video, audio[] — and TopicMetadata dataclass declares all of them, including video and audio[]",
+        "Plan describes detection: kinopoisk/imdb URLs found via a[href*='kinopoisk.ru'] / a[href*='imdb.com'] (sample confirms kinopoisk link present in opening post)",
+        "Plan specifies a regex/label-based extractor (parse `Год выпуска: 2026`, `Жанр: ...`, `Видео: ...`, `Аудио N: ...` etc. from description text), with a fallback that keeps free-text description intact",
+        "Plan defines new TopicMetadata dataclass and how it nests inside TopicDetails without breaking existing description field",
+        "Phase acceptance for parse_topic_metadata explicitly verifies non-empty video and at least one audio[] entry on the planning fixture"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Plan covers browse_forum tool (no-query category listing)",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan defines new MCP tool browse_forum(category_id: str, page: int = 1, sort_by: str = 'seeders', order: str = 'desc') returning paginated list[SearchResult]",
+        "Plan specifies underlying URL viewforum.php?f={id} OR tracker.php?f={id} without nm param (verified: tracker.php?f=252 returns tor-tbl with 50 rows)",
+        "Plan addresses the search.py limitation that query is currently required and explains the client.py change needed to allow empty query"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Plan covers list_categories tool (forum directory)",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan defines new MCP tool list_categories(refresh: bool = False) returning hierarchical list[CategoryGroup], each containing list[ForumCategory]",
+        "Plan specifies source URL index.php and selectors: div.category (26 verified) for groups, h3.cat_title for group titles, a[href*='viewforum.php?f='] (321 verified) for forums",
+        "Plan describes how categories are cached locally (file path .categories.json, TTL 7 days) since the directory rarely changes",
+        "Plan defines CategoryGroup dataclass explicitly and documents how subforum parent_id maps to CategoryGroup.group_id"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Plan covers search pagination",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan extends search() with page: int = 1 and per_page awareness (rutracker default 50, confirmed via sample)",
+        "Plan specifies handling of search_id-based URLs (a.pg href contains search_id=...&start=50, sample-confirmed)",
+        "Plan describes a results_total field on the response (parsed from pagination block) and a follow-up next_page() helper or explicit page arg"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Plan covers query-side filters (year, seeds, size)",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan defines new search params: min_seeds, max_size_gb, year_from, year_to (note: rutracker form does not natively support year — plan must specify client-side post-filter)",
+        "Plan distinguishes server-side filters (sort_by, order, category, query, min seeders via param if available) from client-side post-filters (year/genre derived from title regex)",
+        "Plan documents the regex used to extract year from titles: \\[(\\d{4}),"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "Plan covers download_torrent tool",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan defines new MCP tool download_torrent(topic_id: int, dest_dir: str) -> str returning the saved file path",
+        "Plan specifies the dl.php?t={id} URL and the bb_dl_key cookie requirement; documents that current cache lacks bb_dl_key and adds assert_dl_key + auto-refresh logic in cookies.py / client.py",
+        "Plan documents Content-Disposition filename parsing and a three-step fallback chain (header → sanitized title → topic-{id}.torrent)",
+        "Plan defines a single path policy (dest_dir must resolve under Path.home() or CWD; no override flag) and the acceptance test path is consistent with that policy (NOT /tmp)"
+      ]
+    },
+    {
+      "id": "US-008",
+      "title": "Plan covers typed dataclass refactor",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan lists the new dataclasses with fields: Comment, TopicMetadata, ForumCategory, SearchPage, plus revised TopicDetails and SearchResult",
+        "Plan describes how server.py serialization changes (currently joins strings; new shape must serialize to JSON-friendly text or structured MCP content) without breaking existing clients",
+        "Plan calls out backward compatibility: existing get_topic and search outputs must remain valid for existing Claude Code sessions, or a deprecation/migration note is included"
+      ]
+    },
+    {
+      "id": "US-009",
+      "title": "Plan covers test strategy and tooling",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan adds cargo test as a dev dependency and defines a cargo task `test`",
+        "Plan adds clippy (already implied by project memory `lint=clippy check`) and a cargo task `lint`",
+        "Plan defines tests/ layout: tests/fixtures/ holds the .omc/research/*.html samples (or copies), tests/test_parser.py covers each new selector against fixtures, tests/test_client.py uses respx or httpx MockTransport to stub network",
+        "Plan specifies which behaviors are unit-tested (parsing) vs integration-tested (real network with marker `@cargo test.mark.live`, skipped by default)"
+      ]
+    },
+    {
+      "id": "US-010",
+      "title": "Plan structure, sequencing, risks, and rollout",
+      "passes": true,
+      "acceptanceCriteria": [
+        "Plan organizes work into phases with the test/lint tooling introduced FIRST (Phase 1) so that the per-phase 'green tests + green clippy' gate is achievable from Phase 2 onward",
+        "Plan lists per-phase file-level changes (parser.py, client.py, server.py, cookies.py, .gitignore, README.md, CHANGELOG.md, new tests/) with the specific functions added/modified",
+        "Plan calls out risks: rutracker HTML drift, cp1251 quirks, cookie expiry, MCP output size limits, pagination cost, forum-categories cache staleness, AND the pre-existing parser defects (u-link author, leech selector) that new browse/list features would otherwise inherit",
+        "Plan ends with a checklist for declaring the implementation done (tests passing with 0 skipped, clippy clean, .mcp.json rewritten to point at rutracker-mcp binary (one-line edit), README updated, CHANGELOG entry)"
+      ]
+    },
+    {
+      "id": "US-011",
+      "title": "Codex critic approves the plan",
+      "passes": true,
+      "acceptanceCriteria": [
+        "omc ask codex --agent-prompt critic was invoked on .omc/plans/full-mcp.md with all US-001..US-010 criteria included in the prompt",
+        "The codex prompt includes the optimality directive (is there a meaningfully simpler/faster/more maintainable approach?) and the related-files directive",
+        "Critic verdict is APPROVED, or all blocking issues raised by critic are resolved with edits and a re-review pass also returns APPROVED"
+      ]
+    }
+  ]
+}

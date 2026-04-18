@@ -1,0 +1,47 @@
+[workspace]
+members = [
+    "crates/parser",
+    "crates/http",
+    "crates/cookies-macos",
+    "crates/cli",
+    "crates/mcp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["Peter Gagarinov <4868370+pgagarinov@users.noreply.github.com>"]
+
+[workspace.dependencies]
+# HTML parsing + encoding (parser crate)
+scraper = "0.20"
+encoding_rs = "0.8"
+regex = "1"
+
+# Async HTTP (http crate)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "io-std", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies", "gzip", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors + observability
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Crypto / cookie extraction (cookies-macos crate)
+aes = "0.8"
+cbc = { version = "0.1", features = ["block-padding", "alloc"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+hmac = "0.12"
+sha1 = "0.10"
+
+# Testing
+pretty_assertions = "1"
+wiremock = "0.6"

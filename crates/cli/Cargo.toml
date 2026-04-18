@@ -1,0 +1,33 @@
+[package]
+name = "rutracker-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rutracker"
+path = "src/main.rs"
+
+[dependencies]
+rutracker-parser = { path = "../parser" }
+rutracker-http = { path = "../http" }
+rutracker-cookies-macos = { path = "../cookies-macos" }
+clap = { version = "4", features = ["derive", "env"] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs = "5"
+
+[dev-dependencies]
+wiremock.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
+pretty_assertions.workspace = true
