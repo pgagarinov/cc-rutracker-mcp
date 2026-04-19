@@ -5,6 +5,15 @@ use rutracker_cli::prelude::*;
 use serde_json::Value;
 use std::path::PathBuf;
 
+fn mcp_cfg(cfg: &CliConfig) -> CliConfig {
+    CliConfig {
+        format: OutputFormat::Text,
+        out: None,
+        emit_stdout: false,
+        ..cfg.clone()
+    }
+}
+
 pub async fn dispatch_tool_call(params: &Value, cfg: &CliConfig) -> Result<String> {
     let name = params
         .get("name")
@@ -53,14 +62,8 @@ async fn tool_search(args: &Value, cfg: &CliConfig) -> Result<String> {
         page: arg_u32_or(args, "page", 1),
     };
     // Use a no-side-effects config (no file output, text format).
-    let mcp_cfg = CliConfig {
-        base_url: cfg.base_url.clone(),
-        format: OutputFormat::Text,
-        out: None,
-        cookies: cfg.cookies.clone(),
-        emit_stdout: false,
-    };
-    let rendered = run_search(&mcp_cfg, &search_args).await?;
+    let cfg = mcp_cfg(cfg);
+    let rendered = run_search(&cfg, &search_args).await?;
     Ok(strip_trailing_newline(&rendered))
 }
 
@@ -72,14 +75,8 @@ async fn tool_get_topic(args: &Value, cfg: &CliConfig) -> Result<String> {
         include_comments: arg_bool(args, "include_comments", false),
         max_comment_pages: arg_u32_or(args, "max_comment_pages", 1),
     };
-    let mcp_cfg = CliConfig {
-        base_url: cfg.base_url.clone(),
-        format: OutputFormat::Text,
-        out: None,
-        cookies: cfg.cookies.clone(),
-        emit_stdout: false,
-    };
-    let rendered = run_topic(&mcp_cfg, &topic_args).await?;
+    let cfg = mcp_cfg(cfg);
+    let rendered = run_topic(&cfg, &topic_args).await?;
     Ok(strip_trailing_newline(&rendered))
 }
 
@@ -92,26 +89,14 @@ async fn tool_browse_forum(args: &Value, cfg: &CliConfig) -> Result<String> {
         sort_by: arg_str(args, "sort_by").unwrap_or_else(|| "seeders".into()),
         order: arg_str(args, "order").unwrap_or_else(|| "desc".into()),
     };
-    let mcp_cfg = CliConfig {
-        base_url: cfg.base_url.clone(),
-        format: OutputFormat::Text,
-        out: None,
-        cookies: cfg.cookies.clone(),
-        emit_stdout: false,
-    };
-    let rendered = run_browse(&mcp_cfg, &browse_args).await?;
+    let cfg = mcp_cfg(cfg);
+    let rendered = run_browse(&cfg, &browse_args).await?;
     Ok(strip_trailing_newline(&rendered))
 }
 
 async fn tool_list_categories(cfg: &CliConfig) -> Result<String> {
-    let mcp_cfg = CliConfig {
-        base_url: cfg.base_url.clone(),
-        format: OutputFormat::Text,
-        out: None,
-        cookies: cfg.cookies.clone(),
-        emit_stdout: false,
-    };
-    let rendered = run_categories(&mcp_cfg).await?;
+    let cfg = mcp_cfg(cfg);
+    let rendered = run_categories(&cfg).await?;
     Ok(strip_trailing_newline(&rendered))
 }
 

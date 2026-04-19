@@ -83,9 +83,9 @@ fn extract_skill_commands(text: &str) -> BTreeSet<String> {
 /// Recursively walk the clap help tree starting from `prefix`.
 /// `prefix` is e.g. `&[]` for the root, `&["mirror"]` for subcommands of mirror.
 /// Appends every *leaf* subcommand path (as a space-joined string) to `out`.
-fn walk_cli(bin: &str, prefix: &[&str], out: &mut BTreeSet<String>) {
+fn walk_cli(bin: &str, prefix: &[String], out: &mut BTreeSet<String>) {
     // Build argv: <bin> [prefix...] --help
-    let mut argv: Vec<&str> = prefix.to_vec();
+    let mut argv: Vec<&str> = prefix.iter().map(String::as_str).collect();
     argv.push("--help");
 
     let output = Command::new(bin)
@@ -136,13 +136,8 @@ fn walk_cli(bin: &str, prefix: &[&str], out: &mut BTreeSet<String>) {
         }
     } else {
         for child in children {
-            let mut next_prefix: Vec<&str> = prefix.to_vec();
-            // We need a &str that outlives this iteration; use a local String
-            // and push its slice. We do this by leaking or collecting — instead
-            // just recurse with a cloned string turned into a &str via a local.
-            let child_owned = child.clone();
-            let child_str: &str = Box::leak(child_owned.into_boxed_str());
-            next_prefix.push(child_str);
+            let mut next_prefix: Vec<String> = prefix.to_vec();
+            next_prefix.push(child);
             walk_cli(bin, &next_prefix, out);
         }
     }

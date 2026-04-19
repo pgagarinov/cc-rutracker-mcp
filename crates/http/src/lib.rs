@@ -261,7 +261,7 @@ mod tests {
             .get_text("viewtopic.php", &[("t", "1")])
             .await
             .unwrap_err();
-        matches!(err, Error::LoginRequired);
+        assert!(matches!(err, Error::LoginRequired));
     }
 
     #[tokio::test]
@@ -286,8 +286,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_with_cookies_and_accessors() {
+    #[test]
+    fn test_with_cookies_and_accessors() {
         let mut jar = HashMap::new();
         jar.insert("bb_session".to_string(), "abc".to_string());
         let client = Client::new("https://example.test/forum/")
