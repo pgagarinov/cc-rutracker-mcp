@@ -22,7 +22,14 @@
 soak-*.log
 
 # ---- Agent / tooling state (user-local, not for the repo) ----
+# .claude/ is mostly user-local (settings, hooks, session state), BUT we DO
+# version the project-scoped agents and skills — they are code artefacts that
+# the ranker + scan pipeline depend on at runtime.
 .claude/
+!.claude/agents/
+!.claude/agents/**
+!.claude/skills/
+!.claude/skills/**
 .omc/artifacts/
 .omc/sessions/
 .omc/state/
