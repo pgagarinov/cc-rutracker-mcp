@@ -645,7 +645,44 @@ fn build_topic_file(
         opening_post,
         comments,
         metadata,
+        size_bytes: size_to_bytes(&td.size),
+        seeds: Some(td.seeds),
+        leeches: Some(td.leeches),
+        downloads: Some(row.downloads),
     }
+}
+
+/// Parse a rutracker size string like `"2.22 GB"`, `"502 MB"`, `"700 KB"`, `"123 B"`
+/// into raw bytes. Accepts `.` or `,` as decimal separator. Returns `None` on
+/// empty input or unknown/missing unit. Lives here (not in ranker) so the
+/// mirror can populate `TopicFile.size_bytes` at fetch time without a circular
+/// dep.
+fn size_to_bytes(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let cut = trimmed
+        .char_indices()
+        .find(|(_, c)| c.is_alphabetic())
+        .map(|(i, _)| i)?;
+    let (num_part, unit_part) = trimmed.split_at(cut);
+    let cleaned: String = num_part
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| if c == ',' { '.' } else { c })
+        .collect();
+    let value: f64 = cleaned.parse().ok()?;
+    let unit = unit_part.trim().to_lowercase();
+    let mult: f64 = match unit.as_str() {
+        "b" | "bytes" | "байт" => 1.0,
+        "kb" | "kib" | "кб" | "кбайт" => 1024.0,
+        "mb" | "mib" | "мб" | "мбайт" => 1024.0 * 1024.0,
+        "gb" | "gib" | "гб" | "гбайт" => 1024.0 * 1024.0 * 1024.0,
+        "tb" | "tib" | "тб" | "тбайт" => 1024.0_f64.powi(4),
+        _ => return None,
+    };
+    Some((value * mult) as u64)
 }
 
 /// Rebuild `topic_index` from the on-disk JSON layer. Walks `forums/<id>/topics/*.json`
@@ -1642,6 +1679,10 @@ mod tests {
                     opening_post: Post::default(),
                     comments: Vec::new(),
                     metadata: serde_json::Value::Null,
+                    size_bytes: None,
+                    seeds: None,
+                    leeches: None,
+                    downloads: None,
                 };
                 topic_io::write_json_atomic(&topics_dir.join(format!("{}.json", tid)), &tf)
                     .unwrap();
@@ -1701,6 +1742,10 @@ mod tests {
                 opening_post: Post::default(),
                 comments: Vec::new(),
                 metadata: serde_json::Value::Null,
+                size_bytes: None,
+                seeds: None,
+                leeches: None,
+                downloads: None,
             };
             topic_io::write_json_atomic(&topics_dir.join(format!("{}.json", known_tid)), &tf)
                 .unwrap();

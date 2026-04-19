@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "agent_sha": "fixtureintegrat",
+  "scanned_at": "2026-04-18T12:00:00+00:00",
+  "topic_id": "6000006",
+  "last_post_id": "1006",
+  "analysis": {
+    "sentiment_score": 6.0,
+    "confidence": 0.6,
+    "themes_positive": [],
+    "themes_negative": ["скучновато"],
+    "tech_complaints": {"audio": false, "video": false, "subtitles": false, "dubbing": false, "sync": false},
+    "tech_praise": {"audio": false, "video": false, "subtitles": false, "dubbing": false, "sync": false},
+    "substantive_count": 5,
+    "red_flags": [],
+    "relevance": 0.9
+  }
+}

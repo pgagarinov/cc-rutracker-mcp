@@ -12,7 +12,7 @@ fn test_init_then_open_roundtrip() {
     }
     let m = Mirror::open(td.path(), None).unwrap();
     assert_eq!(m.root(), td.path());
-    assert_eq!(m.state().schema_version().unwrap(), 1);
+    assert_eq!(m.state().schema_version().unwrap(), 2);
 }
 
 #[test]

@@ -287,6 +287,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_with_cookies_and_accessors() {
+        let mut jar = HashMap::new();
+        jar.insert("bb_session".to_string(), "abc".to_string());
+        let client = Client::new("https://example.test/forum/")
+            .unwrap()
+            .with_cookies(jar);
+        assert_eq!(client.base(), "https://example.test/forum/");
+        assert!(!client.user_agent().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_bytes_non_200_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/forum/dl.php"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let client = Client::new(&format!("{}/forum/", server.uri())).unwrap();
+        let err = client.get_bytes("dl.php", &[]).await.unwrap_err();
+        assert!(matches!(err, Error::Status(_)));
+    }
+
+    #[tokio::test]
+    async fn test_login_redirect_via_login_php_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/forum/login.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>sign in</html>"))
+            .mount(&server)
+            .await;
+        let client = Client::new(&format!("{}/forum/", server.uri())).unwrap();
+        let err = client.get_text("login.php", &[]).await.unwrap_err();
+        assert!(matches!(err, Error::LoginRequired));
+    }
+
+    #[test]
+    fn test_new_with_invalid_url_errors() {
+        let err = Client::new("::not a url::").unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)));
+    }
+
+    #[test]
+    fn test_error_from_url_conversion() {
+        // Hit the From<reqwest::Url> impl. We go via parse() because crates
+        // don't construct reqwest::Url manually often.
+        let url: reqwest::Url = "https://example.test/".parse().unwrap();
+        let err: Error = Error::from(url);
+        assert!(matches!(err, Error::InvalidUrl(_)));
+    }
+
+    #[tokio::test]
     async fn test_cookie_header_sent() {
         // Deterministic order: cookie_header sorts by name alphabetically
         // (bb_guid before bb_session).

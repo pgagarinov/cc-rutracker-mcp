@@ -1,5 +1,7 @@
 # RuTracker — Rust CLI + MCP
 
+[![CI](https://github.com/pgagarinov/cc-rutracker-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgagarinov/cc-rutracker-mcp/actions/workflows/ci.yml)
+
 Rust workspace with two binaries sharing one parser/HTTP/cookies core:
 
 | Binary | Purpose |
@@ -86,6 +88,31 @@ cargo fmt --all -- --check
 cargo test --workspace -- --ignored
 ```
 
+### Coverage
+
+Run `cargo llvm-cov --workspace --lcov --output-path lcov.info` for a full
+workspace report. Open `cargo llvm-cov --workspace --html --open` for a
+line-by-line HTML view.
+
+Threshold: ≥95% line coverage, enforced by CI. Exclusions are documented in
+`.cargo/llvm-cov.toml` (or the `--ignore-filename-regex` flag in `.github/workflows/ci.yml`).
+
+Local invocation that matches CI (same exclusion regex, same threshold):
+
+```bash
+IGNORE='crates/cookies-macos/src/keychain\.rs|crates/mcp/src/main\.rs|crates/cli/src/main\.rs|crates/cookies-macos/src/lib\.rs'
+cargo llvm-cov --workspace --locked --summary-only --ignore-filename-regex "$IGNORE"
+```
+
+Excluded paths and rationale:
+
+| Path | Why |
+|---|---|
+| `crates/cookies-macos/src/keychain.rs` | Live macOS Keychain lookup — only reachable via the `#[ignore]`'d live test. |
+| `crates/mcp/src/main.rs` | `rutracker-mcp` stdio read loop — exercised only via a real MCP client session. |
+| `crates/cli/src/main.rs` | Thin clap dispatch wrapper — all logic lives in `crates/cli/src/lib.rs` and `rank.rs`. |
+| `crates/cookies-macos/src/lib.rs` | macOS-only refresh glue that requires a live Keychain prompt. |
+
 ## Local mirror
 
 `rutracker-mirror` keeps an incremental on-disk copy of any forums you watch. The
@@ -147,6 +174,60 @@ revisions are intentionally not kept (plan §5.3). Add `.rutracker/` to a
 repo-level `.gitignore` if the root lives inside a checkout.
 
 Increase log verbosity with `RUST_LOG=rutracker_mirror=debug`.
+
+## Ranking films
+
+`rutracker-ranker` layers an objective community-consensus quality score on
+top of the mirror. It first groups every release topic by film identity, then
+aggregates comment-sentiment across all rips of the same film, and finally
+ranks rips within each film by tech quality, format, health, and recency.
+
+The NLP step (Russian-language comment analysis) runs through a Claude Code
+subagent defined in `.claude/agents/rutracker-film-scanner.md` — no API key
+needed. Rust owns the deterministic pipeline stages; only the per-topic Haiku
+scan hops through the Claude Code harness via a thin `/rank-scan-run` skill.
+
+Three-step user workflow:
+
+```bash
+# Stage A — parse titles, populate film_index + film_topic (idempotent).
+rutracker rank match --forum "Фильмы 2026"
+
+# Stage B.1 — emit the scan-queue.jsonl manifest (Rust, fast, offline).
+rutracker rank scan-prepare --forum "Фильмы 2026"
+
+# Stage B.2 — execute the queue inside a Claude Code session (Haiku scans).
+# (in Claude Code)  /rank-scan-run --forum "Фильмы 2026"
+
+# Stage C — aggregate scan outputs into film_score + rank rips.
+rutracker rank aggregate --forum "Фильмы 2026"
+
+# Query the results.
+rutracker rank list --top 20
+rutracker rank show "Альфа" --format text
+rutracker rank parse-failures
+```
+
+Forum names are resolved via `structure.json` (populated by `rutracker mirror
+structure`). Numeric ids still work for scripting (`--forum 252`). Quote
+multi-word names to prevent shell word-splitting.
+
+`rutracker rank aggregate` prints a warning when topics in the target forum
+have no `.scan.json` yet — that is the cue to run `rutracker rank scan-prepare`
+and then `/rank-scan-run` in Claude Code. Re-running the whole pipeline after
+`mirror sync` fetches new topics is incremental: cached scans with matching
+`agent_sha` + `last_post_id` are skipped automatically.
+
+### Calibration (release gate)
+
+Before shipping new prompt/agent changes, validate scanner output against
+a hand-labelled holdout:
+
+1. Create `crates/ranker/tests/fixtures/ranker/labels.jsonl` with at least
+   20 entries: `{"topic_id":"<tid>","human_score":<0-10>,"note":"..."}`.
+2. Run the three-step scan workflow for the labelled topics.
+3. `scripts/calibrate-scanner.sh` — computes Spearman ρ vs. labels.
+   Release-blocking: ρ ≥ 0.6 is required.
 
 ## Manual release gate
 

@@ -134,6 +134,57 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_topic_id_via_href_fallback() {
+        // Row with no data-topic_id attribute — must fall back to scanning
+        // an <a href="viewtopic.php?t=…"> link.
+        let html = r#"
+<html><body><table><tr>
+  <td class="vf-col-t-title"><a class="tt-text" href="viewtopic.php?t=7777">Fallback</a></td>
+  <td class="u-name-col"><a>alice</a></td>
+  <td class="tor-size"><u>1</u> GB</td>
+  <td><b class="seedmed">3</b></td>
+  <td class="leechmed">1</td>
+</tr></table></body></html>"#;
+        let doc = Html::parse_document(html);
+        let row_sel = Selector::parse("tr").unwrap();
+        let row = doc.select(&row_sel).next().unwrap();
+        let got = parse_topic_row(&row).unwrap();
+        assert_eq!(got.topic_id, 7777);
+        assert_eq!(got.title, "Fallback");
+        assert_eq!(got.author, "alice");
+        assert_eq!(got.seeds, 3);
+        assert_eq!(got.leeches, 1);
+    }
+
+    #[test]
+    fn test_extract_topic_id_none_returned_when_no_id() {
+        // Row with neither data-topic_id nor a viewtopic href yields None.
+        let html = r#"<html><body><table><tr>
+  <td><a href="http://other.example/unrelated">x</a></td>
+</tr></table></body></html>"#;
+        let doc = Html::parse_document(html);
+        let row_sel = Selector::parse("tr").unwrap();
+        let row = doc.select(&row_sel).next().unwrap();
+        assert!(parse_topic_row(&row).is_none());
+    }
+
+    #[test]
+    fn test_extract_topic_id_bad_data_attr_falls_through_to_href() {
+        // data-topic_id with non-numeric value must be ignored; href fallback wins.
+        let html = r#"<html><body><table><tr data-topic_id="not-a-number">
+  <td><a href="viewtopic.php?t=42">X</a></td>
+  <td><u>1</u></td>
+  <td><b class="seedmed">0</b></td>
+  <td class="leechmed">0</td>
+</tr></table></body></html>"#;
+        let doc = Html::parse_document(html);
+        let row_sel = Selector::parse("tr").unwrap();
+        let row = doc.select(&row_sel).next().unwrap();
+        let got = parse_topic_row(&row).unwrap();
+        assert_eq!(got.topic_id, 42);
+    }
+
+    #[test]
     fn test_parse_topic_row_matches_search_and_forum_fixtures() {
         // Search-page row: assert field-by-field equality with the pre-refactor golden.
         let html = decode(SEARCH_FIXTURE);

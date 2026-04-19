@@ -103,6 +103,63 @@ enum Cmd {
         #[command(subcommand)]
         cmd: MirrorCmd,
     },
+    /// Film ranker — titles / scan-prepare / aggregate / list / show.
+    /// Local-only; reads the mirror, no network.
+    Rank {
+        #[command(subcommand)]
+        cmd: RankCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RankCmd {
+    /// Parse mirror topic titles into film_index + film_topic (idempotent).
+    Match {
+        /// Restrict to this forum id. Empty ⇒ all forums on disk + watchlist.
+        #[arg(long)]
+        forum: Option<String>,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Emit the `scan-queue.jsonl` manifest for the `/rank-scan-run` skill.
+    ScanPrepare {
+        #[arg(long)]
+        forum: String,
+        #[arg(long)]
+        max_payload_bytes: Option<usize>,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Aggregate scan outputs into film_score; rank rips per film.
+    Aggregate {
+        #[arg(long)]
+        forum: Option<String>,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Query film_score (JSON default, `--format text` for a compact table).
+    List {
+        #[arg(long)]
+        forum: Option<String>,
+        #[arg(long)]
+        min_score: Option<f32>,
+        #[arg(long)]
+        top: Option<u32>,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Show one film's canonical title, score, themes, and ranked rips.
+    Show {
+        /// film_id or a substring of the Russian/English title.
+        query: String,
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
+    /// Dump `logs/rank-parse-failures.log` contents.
+    ParseFailures {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -201,12 +258,19 @@ async fn main() -> Result<()> {
             )
             .init();
     }
-    let cookies = match load_cookies(&cli.profile) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("warning: cookie load failed: {e}");
-            std::collections::HashMap::new()
+    // Ranker commands are local-only (no HTTP, no downloads) — skip the
+    // Keychain prompt so `rank …` works even without Brave cookies.
+    let needs_cookies = !matches!(cli.cmd, Cmd::Rank { .. });
+    let cookies = if needs_cookies {
+        match load_cookies(&cli.profile) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("warning: cookie load failed: {e}");
+                std::collections::HashMap::new()
+            }
         }
+    } else {
+        std::collections::HashMap::new()
     };
     let cfg = CliConfig {
         base_url: cli.base_url.clone(),
@@ -304,11 +368,17 @@ async fn main() -> Result<()> {
             }
             MirrorCmd::Watch { cmd } => match cmd {
                 WatchCmd::Add { forum_id, root } => {
+                    let mirror_root = mirror_root_for(root.as_ref());
+                    let forum_id =
+                        resolve_forum(&mirror_root, &forum_id).context("resolving forum")?;
                     run_watch_add(&cfg, &WatchArgs { forum_id, root })
                         .await
                         .context("watch add failed")?;
                 }
                 WatchCmd::Remove { forum_id, root } => {
+                    let mirror_root = mirror_root_for(root.as_ref());
+                    let forum_id =
+                        resolve_forum(&mirror_root, &forum_id).context("resolving forum")?;
                     run_watch_remove(&cfg, &WatchArgs { forum_id, root })
                         .await
                         .context("watch remove failed")?;
@@ -329,6 +399,12 @@ async fn main() -> Result<()> {
                 force_full,
                 root,
             } => {
+                let mirror_root = mirror_root_for(root.as_ref());
+                let forums = forums
+                    .into_iter()
+                    .map(|f| resolve_forum(&mirror_root, &f))
+                    .collect::<Result<Vec<_>>>()
+                    .context("resolving forum ids")?;
                 match run_mirror_sync(
                     &cfg,
                     &SyncCliArgs {
@@ -356,14 +432,16 @@ async fn main() -> Result<()> {
                 }
             }
             MirrorCmd::Show { target, root } => {
-                let (forum_id, topic_id) = target.split_once('/').ok_or_else(|| {
+                let (forum_ref, topic_id) = target.split_once('/').ok_or_else(|| {
                     anyhow::anyhow!("expected <forum_id>/<topic_id>, got {target}")
                 })?;
+                let mirror_root = mirror_root_for(root.as_ref());
+                let forum_id = resolve_forum(&mirror_root, forum_ref).context("resolving forum")?;
                 run_mirror_show(
                     &cfg,
                     &ShowArgs {
                         root,
-                        forum_id: forum_id.to_string(),
+                        forum_id,
                         topic_id: topic_id.to_string(),
                     },
                 )
@@ -379,6 +457,82 @@ async fn main() -> Result<()> {
                 run_mirror_rebuild_index(&cfg, &MirrorRootArgs { root })
                     .await
                     .context("mirror rebuild-index failed")?;
+            }
+        },
+        Cmd::Rank { cmd } => match cmd {
+            RankCmd::Match { forum, root } => {
+                let forum = if let Some(f) = forum {
+                    let mirror_root = mirror_root_for(root.as_ref());
+                    Some(resolve_forum(&mirror_root, &f).context("resolving forum")?)
+                } else {
+                    None
+                };
+                run_rank_match(&cfg, &RankMatchArgs { forum, root })
+                    .await
+                    .context("rank match failed")?;
+            }
+            RankCmd::ScanPrepare {
+                forum,
+                max_payload_bytes,
+                root,
+            } => {
+                let mirror_root = mirror_root_for(root.as_ref());
+                let forum = resolve_forum(&mirror_root, &forum).context("resolving forum")?;
+                run_rank_scan_prepare(
+                    &cfg,
+                    &RankScanPrepareArgs {
+                        forum,
+                        max_payload_bytes,
+                        root,
+                    },
+                )
+                .await
+                .context("rank scan-prepare failed")?;
+            }
+            RankCmd::Aggregate { forum, root } => {
+                let forum = if let Some(f) = forum {
+                    let mirror_root = mirror_root_for(root.as_ref());
+                    Some(resolve_forum(&mirror_root, &f).context("resolving forum")?)
+                } else {
+                    None
+                };
+                run_rank_aggregate(&cfg, &RankAggregateArgs { forum, root })
+                    .await
+                    .context("rank aggregate failed")?;
+            }
+            RankCmd::List {
+                forum,
+                min_score,
+                top,
+                root,
+            } => {
+                let forum = if let Some(f) = forum {
+                    let mirror_root = mirror_root_for(root.as_ref());
+                    Some(resolve_forum(&mirror_root, &f).context("resolving forum")?)
+                } else {
+                    None
+                };
+                run_rank_list(
+                    &cfg,
+                    &RankListArgs {
+                        forum,
+                        min_score,
+                        top,
+                        root,
+                    },
+                )
+                .await
+                .context("rank list failed")?;
+            }
+            RankCmd::Show { query, root } => {
+                run_rank_show(&cfg, &RankShowArgs { query, root })
+                    .await
+                    .context("rank show failed")?;
+            }
+            RankCmd::ParseFailures { root } => {
+                run_rank_parse_failures(&cfg, &RankParseFailuresArgs { root })
+                    .await
+                    .context("rank parse-failures failed")?;
             }
         },
     }

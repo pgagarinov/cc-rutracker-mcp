@@ -1,0 +1,59 @@
+US-008 — Coverage tooling + ≥95% line coverage
+================================================
+
+BASELINE (pre-work, cargo llvm-cov --workspace --summary-only, 149 tests)
+-------------------------------------------------------------------------
+TOTAL lines: 7749  missed: 1426  line coverage: 81.60%
+TOTAL regions: 12661 missed: 2655 region coverage: 79.03%
+TOTAL functions: 803 missed: 164 function coverage: 79.58%
+
+Biggest gaps (baseline, before exclusion filter):
+  cli/src/main.rs             — 0.00% line (bin entry — argparse + async main) → EXCLUDED
+  cli/src/rank.rs             — 63.54% line
+  cli/src/lib.rs              — large gaps in mirror/watch handlers
+  mcp/src/dispatch.rs         — 35.56% line (only smoke-covered)
+  mcp/src/main.rs             — 0.00% line (stdio read loop) → EXCLUDED
+  cookies-macos/src/keychain.rs — 0.00% line (live macOS Keychain) → EXCLUDED
+  cookies-macos/src/store.rs  — 0.00% line (SQLite reader, no fixture test)
+  cookies-macos/src/lib.rs    — 21.92% line (macOS refresh; live Keychain) → EXCLUDED
+
+Exclusions applied (documented in .cargo/llvm-cov.toml + CI IGNORE_REGEX + README):
+  1. crates/cookies-macos/src/keychain.rs — live macOS Keychain prompt-gated I/O.
+  2. crates/mcp/src/main.rs               — JSON-RPC stdio read loop.
+  3. crates/cli/src/main.rs               — thin clap wrapper (subprocess-only entry).
+  4. crates/cookies-macos/src/lib.rs      — macOS refresh glue requiring live Keychain.
+
+All exclusions applied consistently via a single IGNORE_REGEX in:
+  - .cargo/llvm-cov.toml (descriptive manifest with per-path rationale)
+  - .github/workflows/ci.yml  (`coverage` job `env.IGNORE_REGEX`)
+  - README.md (Testing → Coverage section)
+
+FINAL (post-work, with same --ignore-filename-regex, 221 tests)
+----------------------------------------------------------------
+TOTAL lines: 8468  missed: 418  line coverage: 95.06%
+TOTAL regions: 14230 missed: 968 region coverage: 93.20%
+TOTAL functions: 903 missed: 60 function coverage: 93.36%
+
+(Numbers drift ±0.05% run-to-run because cargo-llvm-cov counts derive macros
+as source lines and the exact count varies with fmt/toolchain state. Every
+run in this session landed in the 95.05%–95.10% band, comfortably above the
+95.00% CI threshold.)
+
+Test count: 149 (baseline) → 221 (final) = +72 new tests.
+
+Quality gates:
+  cargo test --workspace --locked              ✔  221 passed, 0 failed, 1 ignored
+  cargo clippy --workspace --all-targets …     ✔  clean (-D warnings)
+  cargo fmt --all -- --check                   ✔  clean
+  cargo llvm-cov --workspace --summary-only …  ✔  95.08% ≥ 95%
+
+Notable coverage improvements by file:
+  cli/src/lib.rs        67.48% →  94.2%   (run_watch_remove, mirror init/structure/status/rebuild-index, sync paths, resolve_forum errors, emit() tests, log-file routing)
+  cli/src/rank.rs       63.54% →  95.0%   (run_rank_show, run_rank_parse_failures, run_rank_scan_prepare, forum_ids_for union, parse-failure log path)
+  mcp/src/dispatch.rs   35.56% →  98.97%  (every tool + every error path)
+  cookies-macos/store.rs 0.00% →  97.53%  (SQLite fixture db test)
+  parser/row.rs         85.84% →  higher  (data-topic_id fallback + href scan + bad attr branches)
+  parser/text_format.rs 84.21% →  higher  (empty-results hint, truncation >50 files, empty-fields omission)
+  http/lib.rs           92.11% →  higher  (invalid URL, non-200 get_bytes, login.php redirect, From<Url>, accessors)
+  mirror/mirror.rs      81.33% →  higher  (default_root probe, NotInitialized, with_client, forum_topics_dir)
+  ranker/scan_prepare.rs 84.92% → higher  (no-topics-dir branch, invalid-json error, non-JSON file skip, serde round-trip)

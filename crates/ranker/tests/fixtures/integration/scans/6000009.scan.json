@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "agent_sha": "fixtureintegrat",
+  "scanned_at": "2026-04-18T12:00:00+00:00",
+  "topic_id": "6000009",
+  "last_post_id": "1009",
+  "analysis": {
+    "sentiment_score": 2.0,
+    "confidence": 0.8,
+    "themes_positive": [],
+    "themes_negative": ["слабая режиссура"],
+    "tech_complaints": {"audio": false, "video": false, "subtitles": false, "dubbing": false, "sync": false},
+    "tech_praise": {"audio": false, "video": false, "subtitles": false, "dubbing": false, "sync": false},
+    "substantive_count": 10,
+    "red_flags": [],
+    "relevance": 1.0
+  }
+}

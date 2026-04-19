@@ -107,6 +107,61 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_search_returns_no_results_hint() {
+        let out = format_search_legacy(&[]);
+        assert_eq!(out, "No results found.");
+    }
+
+    #[test]
+    fn test_search_row_omits_empty_fields() {
+        // Row with empty size, empty category, empty author should still render
+        // but omit those sections.
+        let results = vec![SearchResult {
+            topic_id: 42,
+            title: "Minimal".into(),
+            size: String::new(),
+            seeds: 0,
+            leeches: 0,
+            category: String::new(),
+            author: String::new(),
+        }];
+        let out = format_search_legacy(&results);
+        assert!(out.contains("[42] Minimal"));
+        assert!(out.contains("Seeds: 0 | Leeches: 0"));
+        assert!(!out.contains("Size: "));
+        assert!(!out.contains("Category: "));
+        assert!(!out.contains("Author: "));
+    }
+
+    #[test]
+    fn test_topic_omits_empty_sections_and_truncates_files() {
+        let td = TopicDetails {
+            topic_id: 1,
+            title: "Topic Title".into(),
+            magnet_link: String::new(),
+            size: String::new(),
+            seeds: 1,
+            leeches: 0,
+            description: String::new(),
+            file_list: (0..60).map(|i| format!("file-{i}.mkv")).collect(),
+            metadata: None,
+            comments: Vec::new(),
+            comment_pages_fetched: 1,
+            comment_pages_total: 1,
+        };
+        let out = format_topic_legacy(&td);
+        assert!(out.contains("Title: Topic Title"));
+        assert!(!out.contains("Size: "));
+        assert!(!out.contains("Magnet: "));
+        assert!(!out.contains("\nDescription:\n"));
+        assert!(out.contains("Files (60):"));
+        assert!(
+            out.contains("... and 10 more files"),
+            "expected truncation summary, got: {out}"
+        );
+    }
+
+    #[test]
     fn test_legacy_get_topic_byte_equal() {
         // The legacy snapshot was captured from a live topic (t=6843582, "Project Hail Mary").
         // Our fixture topic-sample.html is a different topic (t=6843582 in sample but with

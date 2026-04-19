@@ -33,6 +33,10 @@ impl From<rutracker_parser::Comment> for Post {
 
 /// On-disk topic archive. The source of truth — SQLite `topic_index` is a
 /// derived cache rebuildable from these files (plan §4.1).
+///
+/// The `size_bytes` / `seeds` / `leeches` / `downloads` fields were added in
+/// schema v2 (US-002) for the ranker's rip scorer. They are `Option` + serde
+/// `default` so older `.json` files without them still deserialise cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopicFile {
     pub schema_version: u32,
@@ -45,6 +49,14 @@ pub struct TopicFile {
     pub opening_post: Post,
     pub comments: Vec<Post>,
     pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seeds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leeches: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloads: Option<u32>,
 }
 
 /// Serialize `value` as pretty JSON and write it atomically to `path`.
@@ -81,4 +93,40 @@ fn tmp_path(path: &Path) -> std::path::PathBuf {
         .unwrap_or_default();
     name.push(".tmp");
     path.with_file_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Older `.json` topic files predate US-002's size_bytes / seeds / leeches /
+    /// downloads fields. The struct must still deserialise cleanly and leave
+    /// those fields as `None` so the mirror can load v1-era mirrors unchanged.
+    #[test]
+    fn test_older_topic_file_without_rip_metadata_deserialises() {
+        let legacy_json = r#"{
+            "schema_version": 1,
+            "topic_id": "6843582",
+            "forum_id": "252",
+            "title": "Some Title",
+            "fetched_at": "2026-04-18T20:30:44.785551+00:00",
+            "last_post_id": 100,
+            "last_post_at": "2026-04-18T20:00:00+00:00",
+            "opening_post": {
+                "post_id": 0,
+                "author": "",
+                "date": "",
+                "text": "opening"
+            },
+            "comments": [],
+            "metadata": null
+        }"#;
+
+        let tf: TopicFile = serde_json::from_str(legacy_json).expect("legacy JSON must parse");
+        assert_eq!(tf.topic_id, "6843582");
+        assert_eq!(tf.size_bytes, None);
+        assert_eq!(tf.seeds, None);
+        assert_eq!(tf.leeches, None);
+        assert_eq!(tf.downloads, None);
+    }
 }

@@ -1,0 +1,40 @@
+# cargo-llvm-cov exclusion manifest (US-008).
+#
+# This is a descriptive manifest. cargo-llvm-cov v0.8.x does not auto-load a
+# config file; the canonical exclusion list is applied via the
+# `--ignore-filename-regex` flag. Local invocation, CI, and the README all
+# use the same regex assembled from the `excludes` below.
+#
+# Whenever this file is edited, also update:
+#   - the `IGNORE_REGEX:` env block in .github/workflows/ci.yml (coverage job)
+#   - the Coverage section in README.md
+# and rerun the local invocation to confirm the threshold is still met:
+#   cargo llvm-cov --workspace --summary-only --ignore-filename-regex '<regex>'
+#
+# Canonical regex (alternation, no trailing newline):
+#   crates/cookies-macos/src/keychain\.rs|crates/mcp/src/main\.rs|crates/cli/src/main\.rs|crates/cookies-macos/src/lib\.rs
+
+[[excludes]]
+path   = "crates/cookies-macos/src/keychain.rs"
+reason = "Live macOS Keychain I/O. Only reachable by the #[ignore]'d integration test that pops the user-prompt — not safe to run in CI."
+
+[[excludes]]
+path   = "crates/mcp/src/main.rs"
+reason = "`rutracker-mcp` stdio JSON-RPC read loop. Only reachable via a live MCP client session; exercised manually via Claude Code."
+
+[[excludes]]
+path   = "crates/cli/src/main.rs"
+reason = "`rutracker` clap dispatch wrapper. Only reachable via a subprocess spawn. All handler logic lives in crates/cli/src/lib.rs + rank.rs and is directly unit-tested."
+
+[[excludes]]
+path   = "crates/cookies-macos/src/lib.rs"
+reason = "macOS-only refresh glue (`refresh_brave_cookies`) that requires a live Keychain prompt. `assert_dl_key` and its tests are still covered by `cargo test`, but they are too small to offset the always-uncovered refresh path in the file-level metric."
+
+# --- Exclusions that DO NOT need a regex ---
+# 1. `#[ignore]`'d tests: not executed by default; their bodies are dead code
+#    to llvm-cov unless you run `cargo llvm-cov -- --ignored`.
+# 2. Panic-injection helpers in crates/mirror/src/engine.rs are gated on
+#    `#[cfg(any(test, feature = "fail-injection"))]`; they ARE covered by the
+#    `RUTRACKER_MIRROR_FAIL_AFTER_N_TOPICS` test that walks the panic path, so
+#    they do not need to be excluded.
+# 3. Live HTTP smoke paths (`#[ignore]`'d wiremock variants) — same as (1).

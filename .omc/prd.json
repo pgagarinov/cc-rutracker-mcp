@@ -1,132 +1,66 @@
 {
-  "project": "rutracker-mcp full-scope expansion plan",
-  "task_kind": "planning_deliverable",
-  "summary": "Author .omc/plans/full-mcp.md — a complete implementation plan for expanding the RuTracker MCP from 2 tools (search, get_topic) to a feature-complete server covering comments, structured metadata, browsing, listing categories, pagination, filters, .torrent download, typed dataclasses, and tests. Plan must be Codex-critic-approved.",
-  "deliverable_paths": [
-    ".omc/plans/full-mcp.md",
-    ".omc/prd.json"
-  ],
-  "out_of_scope": [
-    "Implementing the plan (this run produces the plan only)",
-    "Write operations on rutracker (post, vote, comment)",
-    "Cross-platform cookie support beyond current Brave-on-macOS"
-  ],
+  "title": "Skill-CLI drift + full CI + 100% coverage",
+  "critic": "codex",
   "stories": [
     {
-      "id": "US-001",
-      "title": "Plan covers comment extraction with pagination",
-      "passes": true,
-      "acceptanceCriteria": [
-        "Plan names the exact selector tbody[id^='post_'] for posts and div.post_body for body content (verified against .omc/research/topic-sample.html which contains 30 such posts)",
-        "Plan specifies how to extract per-comment author (p.nick), date (a.small or similar), and body text",
-        "Plan describes topic-page pagination strategy: detect a.pg links, follow start= query param, cap pages with a max_pages parameter (default given)",
-        "Plan defines the new TopicDetails.comments field shape (list[Comment] dataclass with author, date, text, post_id) and the new MCP tool signature get_topic(topic_id, include_comments: bool = False, max_comment_pages: int = 1)"
-      ]
-    },
-    {
-      "id": "US-002",
-      "title": "Plan covers structured metadata parsing from first post",
-      "passes": true,
-      "acceptanceCriteria": [
-        "Plan lists the structured fields to extract: imdb_rating, kinopoisk_rating, year, country, genre, director, cast, duration, release_type, video, audio[] — and TopicMetadata dataclass declares all of them, including video and audio[]",
-        "Plan describes detection: kinopoisk/imdb URLs found via a[href*='kinopoisk.ru'] / a[href*='imdb.com'] (sample confirms kinopoisk link present in opening post)",
-        "Plan specifies a regex/label-based extractor (parse `Год выпуска: 2026`, `Жанр: ...`, `Видео: ...`, `Аудио N: ...` etc. from description text), with a fallback that keeps free-text description intact",
-        "Plan defines new TopicMetadata dataclass and how it nests inside TopicDetails without breaking existing description field",
-        "Phase acceptance for parse_topic_metadata explicitly verifies non-empty video and at least one audio[] entry on the planning fixture"
-      ]
-    },
-    {
-      "id": "US-003",
-      "title": "Plan covers browse_forum tool (no-query category listing)",
-      "passes": true,
-      "acceptanceCriteria": [
-        "Plan defines new MCP tool browse_forum(category_id: str, page: int = 1, sort_by: str = 'seeders', order: str = 'desc') returning paginated list[SearchResult]",
-        "Plan specifies underlying URL viewforum.php?f={id} OR tracker.php?f={id} without nm param (verified: tracker.php?f=252 returns tor-tbl with 50 rows)",
-        "Plan addresses the search.py limitation that query is currently required and explains the client.py change needed to allow empty query"
-      ]
-    },
-    {
-      "id": "US-004",
-      "title": "Plan covers list_categories tool (forum directory)",
-      "passes": true,
-      "acceptanceCriteria": [
-        "Plan defines new MCP tool list_categories(refresh: bool = False) returning hierarchical list[CategoryGroup], each containing list[ForumCategory]",
-        "Plan specifies source URL index.php and selectors: div.category (26 verified) for groups, h3.cat_title for group titles, a[href*='viewforum.php?f='] (321 verified) for forums",
-        "Plan describes how categories are cached locally (file path .categories.json, TTL 7 days) since the directory rarely changes",
-        "Plan defines CategoryGroup dataclass explicitly and documents how subforum parent_id maps to CategoryGroup.group_id"
-      ]
-    },
-    {
-      "id": "US-005",
-      "title": "Plan covers search pagination",
-      "passes": true,
-      "acceptanceCriteria": [
-        "Plan extends search() with page: int = 1 and per_page awareness (rutracker default 50, confirmed via sample)",
-        "Plan specifies handling of search_id-based URLs (a.pg href contains search_id=...&start=50, sample-confirmed)",
-        "Plan describes a results_total field on the response (parsed from pagination block) and a follow-up next_page() helper or explicit page arg"
-      ]
-    },
-    {
       "id": "US-006",
-      "title": "Plan covers query-side filters (year, seeds, size)",
+      "name": "Bi-directional skill↔CLI drift test",
       "passes": true,
+      "priority": 1,
       "acceptanceCriteria": [
-        "Plan defines new search params: min_seeds, max_size_gb, year_from, year_to (note: rutracker form does not natively support year — plan must specify client-side post-filter)",
-        "Plan distinguishes server-side filters (sort_by, order, category, query, min seeders via param if available) from client-side post-filters (year/genre derived from title regex)",
-        "Plan documents the regex used to extract year from titles: \\[(\\d{4}),"
+        "New test file crates/cli/tests/skill_drift.rs exists.",
+        "Test extracts every `rutracker …` command mentioned in .claude/skills/rutracker.md (any subcommand depth) into a set A.",
+        "Test extracts every clap subcommand path from the built rutracker binary by walking `--help` output recursively into a set B.",
+        "Assertion 1 (no extras in skill): A \\ B is empty — every command in the skill must exist in the CLI.",
+        "Assertion 2 (no gaps in skill): B \\ A is empty UNLESS the command appears in a documented allowlist in the same test file (with a 1-line rationale per entry).",
+        "Test uses CARGO_BIN_EXE_rutracker to locate the built binary — no cargo-install step required.",
+        "Test name `test_skill_commands_match_cli_surface` appears in `cargo test --workspace` output and passes.",
+        "cargo test --workspace / clippy / fmt all clean."
       ]
     },
     {
       "id": "US-007",
-      "title": "Plan covers download_torrent tool",
+      "name": "GitHub Actions CI",
       "passes": true,
+      "priority": 2,
       "acceptanceCriteria": [
-        "Plan defines new MCP tool download_torrent(topic_id: int, dest_dir: str) -> str returning the saved file path",
-        "Plan specifies the dl.php?t={id} URL and the bb_dl_key cookie requirement; documents that current cache lacks bb_dl_key and adds assert_dl_key + auto-refresh logic in cookies.py / client.py",
-        "Plan documents Content-Disposition filename parsing and a three-step fallback chain (header → sanitized title → topic-{id}.torrent)",
-        "Plan defines a single path policy (dest_dir must resolve under Path.home() or CWD; no override flag) and the acceptance test path is consistent with that policy (NOT /tmp)"
+        ".github/workflows/ci.yml exists and declares jobs: test, clippy, fmt, coverage.",
+        "CI triggers: on push to main, on pull_request against main.",
+        "Rust toolchain: stable, with dtolnay/rust-toolchain@stable action + caching via Swatinem/rust-cache.",
+        "test job runs `cargo test --workspace --locked` on ubuntu-latest AND macos-latest; uses --locked to catch Cargo.lock drift.",
+        "clippy job runs `cargo clippy --workspace --all-targets --locked -- -D warnings`.",
+        "fmt job runs `cargo fmt --all -- --check`.",
+        "coverage job uses cargo-llvm-cov, fails the build if coverage drops below 95% line coverage.",
+        "Workflow syntax is valid (`actionlint` parses without error OR local GitHub CLI `gh workflow view` succeeds; verify with `python -c 'import yaml; yaml.safe_load(open(\".github/workflows/ci.yml\"))'`).",
+        "Badge in README.md pointing at the workflow status.",
+        "Workflow runs green on at least one commit after push to origin/main (verified via `gh run list --workflow=ci.yml --limit 1 --json status,conclusion` showing `completed`/`success`)."
       ]
     },
     {
       "id": "US-008",
-      "title": "Plan covers typed dataclass refactor",
+      "name": "Coverage tooling + documented 100% (≥95% effective, gaps justified)",
       "passes": true,
+      "priority": 3,
       "acceptanceCriteria": [
-        "Plan lists the new dataclasses with fields: Comment, TopicMetadata, ForumCategory, SearchPage, plus revised TopicDetails and SearchResult",
-        "Plan describes how server.py serialization changes (currently joins strings; new shape must serialize to JSON-friendly text or structured MCP content) without breaking existing clients",
-        "Plan calls out backward compatibility: existing get_topic and search outputs must remain valid for existing Claude Code sessions, or a deprecation/migration note is included"
+        "cargo-llvm-cov installed locally; README 'Development' section documents `cargo llvm-cov --workspace --lcov --output-path lcov.info`.",
+        "A baseline coverage report is generated; current line coverage % is recorded in progress.txt.",
+        "New tests added where gaps exist; target ≥95% line coverage workspace-wide (pragmatic 100% with documented exclusions).",
+        "Paths that CANNOT be 100%-unit-tested are explicitly excluded via `#[cfg_attr(coverage_nightly, coverage(off))]` or `// LCOV_EXCL_*` markers, each with a one-line rationale comment. Known exclusions: live macOS Keychain I/O in cookies-macos/src/keychain.rs, the MCP stdio loop's EOF path in mcp/src/main.rs, any `#[ignore]`-d live tests.",
+        "A llvm-cov.toml (or .config/nextest.toml-equivalent) file or cargo-llvm-cov CLI flags configured to treat these exclusions consistently in CI.",
+        "`cargo llvm-cov --workspace --summary-only` reports ≥95% line coverage; the exact number goes into progress.txt.",
+        "CI coverage job enforces the same ≥95% threshold (see US-007)."
       ]
     },
     {
       "id": "US-009",
-      "title": "Plan covers test strategy and tooling",
-      "passes": true,
+      "name": "CI is green on remote",
+      "passes": false,
+      "priority": 4,
       "acceptanceCriteria": [
-        "Plan adds cargo test as a dev dependency and defines a cargo task `test`",
-        "Plan adds clippy (already implied by project memory `lint=clippy check`) and a cargo task `lint`",
-        "Plan defines tests/ layout: tests/fixtures/ holds the .omc/research/*.html samples (or copies), tests/test_parser.py covers each new selector against fixtures, tests/test_client.py uses respx or httpx MockTransport to stub network",
-        "Plan specifies which behaviors are unit-tested (parsing) vs integration-tested (real network with marker `@cargo test.mark.live`, skipped by default)"
-      ]
-    },
-    {
-      "id": "US-010",
-      "title": "Plan structure, sequencing, risks, and rollout",
-      "passes": true,
-      "acceptanceCriteria": [
-        "Plan organizes work into phases with the test/lint tooling introduced FIRST (Phase 1) so that the per-phase 'green tests + green clippy' gate is achievable from Phase 2 onward",
-        "Plan lists per-phase file-level changes (parser.py, client.py, server.py, cookies.py, .gitignore, README.md, CHANGELOG.md, new tests/) with the specific functions added/modified",
-        "Plan calls out risks: rutracker HTML drift, cp1251 quirks, cookie expiry, MCP output size limits, pagination cost, forum-categories cache staleness, AND the pre-existing parser defects (u-link author, leech selector) that new browse/list features would otherwise inherit",
-        "Plan ends with a checklist for declaring the implementation done (tests passing with 0 skipped, clippy clean, .mcp.json rewritten to point at rutracker-mcp binary (one-line edit), README updated, CHANGELOG entry)"
-      ]
-    },
-    {
-      "id": "US-011",
-      "title": "Codex critic approves the plan",
-      "passes": true,
-      "acceptanceCriteria": [
-        "omc ask codex --agent-prompt critic was invoked on .omc/plans/full-mcp.md with all US-001..US-010 criteria included in the prompt",
-        "The codex prompt includes the optimality directive (is there a meaningfully simpler/faster/more maintainable approach?) and the related-files directive",
-        "Critic verdict is APPROVED, or all blocking issues raised by critic are resolved with edits and a re-review pass also returns APPROVED"
+        "Local `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check && cargo llvm-cov --workspace --summary-only` all exit 0 AND coverage ≥ 95%.",
+        "All local changes committed and pushed to origin/main.",
+        "`gh run list --workflow=ci.yml --limit 1 --json status,conclusion` reports conclusion=success for the latest run.",
+        "If CI fails, fixes are applied, re-pushed, and the run is re-checked until green."
       ]
     }
   ]

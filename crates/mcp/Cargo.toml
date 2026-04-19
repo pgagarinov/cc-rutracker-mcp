@@ -30,3 +30,4 @@ tracing-subscriber.workspace = true
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 pretty_assertions.workspace = true
+dirs = "5"

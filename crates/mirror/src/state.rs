@@ -7,8 +7,6 @@ use rusqlite::{params, Connection};
 
 use crate::Result;
 
-const MIGRATION_0001: &str = include_str!("../migrations/0001_init.sql");
-
 pub struct State {
     conn: Connection,
 }
@@ -21,11 +19,12 @@ impl State {
         Ok(Self { conn })
     }
 
-    /// Create `state.db` and apply migration `0001_init.sql`.
+    /// Create a fresh `state.db`. Migrations are applied by the caller via
+    /// [`crate::migrate::ensure_schema`], which handles the empty-DB case
+    /// (no `schema_meta` table → treat as version 0 → apply all).
     pub fn init(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
         apply_pragmas(&conn)?;
-        conn.execute_batch(MIGRATION_0001)?;
         Ok(Self { conn })
     }
 

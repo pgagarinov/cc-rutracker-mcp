@@ -2,6 +2,35 @@
 
 All notable changes to this project are documented in this file. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [SemVer](https://semver.org/).
 
+## [1.3.0] — 2026-04-19
+
+### Added — Film quality ranker
+
+New `rutracker-ranker` crate and `rutracker rank …` CLI subcommand tree. The
+ranker layers an objective community-consensus score on top of the mirror by
+grouping release topics into films, aggregating per-topic comment sentiment
+via a Claude Code subagent (`.claude/agents/rutracker-film-scanner.md`), and
+ranking rips within each film by tech quality, format, health, and recency.
+
+- `rutracker rank match` — parse titles, populate `film_index` / `film_topic`
+  (idempotent upsert; unparseable titles logged to
+  `logs/rank-parse-failures.log`).
+- `rutracker rank scan-prepare --forum <id>` — emit the `scan-queue.jsonl`
+  manifest for the `/rank-scan-run` skill to consume. Cache-aware: topics with
+  matching `agent_sha` + `last_post_id` are skipped.
+- `rutracker rank aggregate [--forum <id>]` — Bayesian-shrunk film score
+  (`μ₀=5.5`, `k=5`) + per-film rip ranking; warns on topics with no
+  `.scan.json`.
+- `rutracker rank list [--forum] [--min-score] [--top] [--format json|text]`
+  — query `film_score`, descending by score.
+- `rutracker rank show <film_id|title>` — canonical title, themes, ranked
+  rips with per-axis rationale.
+- `rutracker rank parse-failures` — dump the parse-failure log.
+
+No new network surface: Haiku scans run inside the existing Claude Code
+harness through the shipped `/rank-scan-run` skill; Rust stays offline.
+Schema bumped v1 → v2 with a new `apply_pending_migrations` runner.
+
 ## [1.2.0] — 2026-04-18
 
 ### Added — Sync automation + humanization

@@ -132,3 +132,205 @@ async fn tool_download_torrent(args: &Value, cfg: &CliConfig) -> Result<String> 
 fn strip_trailing_newline(s: &str) -> String {
     s.strip_suffix('\n').unwrap_or(s).to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rutracker_cli::prelude::CliConfig;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const FORUM_FIXTURE: &[u8] = include_bytes!("../../parser/tests/fixtures/forum-sample.html");
+    const TOPIC_FIXTURE: &[u8] = include_bytes!("../../parser/tests/fixtures/topic-sample.html");
+    const INDEX_FIXTURE: &[u8] = include_bytes!("../../parser/tests/fixtures/index-sample.html");
+
+    fn cfg(server: &MockServer) -> CliConfig {
+        CliConfig {
+            base_url: format!("{}/forum/", server.uri()),
+            format: rutracker_cli::prelude::OutputFormat::Text,
+            out: None,
+            cookies: HashMap::new(),
+            emit_stdout: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_search_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wm_path("/forum/tracker.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(FORUM_FIXTURE.to_vec()))
+            .mount(&server)
+            .await;
+        let params = json!({
+            "name": "search",
+            "arguments": {"query": "test", "category": "252"}
+        });
+        let text = dispatch_tool_call(&params, &cfg(&server)).await.unwrap();
+        assert!(text.starts_with("Found "), "unexpected shape: {text}");
+        // strip_trailing_newline should have removed the trailing '\n'
+        assert!(!text.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_get_topic_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wm_path("/forum/viewtopic.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(TOPIC_FIXTURE.to_vec()))
+            .mount(&server)
+            .await;
+        let params = json!({
+            "name": "get_topic",
+            "arguments": {"topic_id": 6843582, "include_comments": true}
+        });
+        let text = dispatch_tool_call(&params, &cfg(&server)).await.unwrap();
+        assert!(text.contains("Title: "), "missing Title line: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_browse_forum_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wm_path("/forum/tracker.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(FORUM_FIXTURE.to_vec()))
+            .mount(&server)
+            .await;
+        let params = json!({
+            "name": "browse_forum",
+            "arguments": {"category_id": "252"}
+        });
+        let text = dispatch_tool_call(&params, &cfg(&server)).await.unwrap();
+        assert!(text.starts_with("Found "));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_list_categories_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wm_path("/forum/index.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(INDEX_FIXTURE.to_vec()))
+            .mount(&server)
+            .await;
+        let params = json!({
+            "name": "list_categories",
+            "arguments": {}
+        });
+        let text = dispatch_tool_call(&params, &cfg(&server)).await.unwrap();
+        assert!(
+            text.contains("[c-"),
+            "categories output missing [c-… prefix: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_download_torrent_tool() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(wm_path("/forum/dl.php"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"d8:announceX5:dummye".to_vec())
+                    .insert_header("content-type", "application/x-bittorrent"),
+            )
+            .mount(&server)
+            .await;
+        // Target under $HOME so the default sandbox accepts it.
+        let home = dirs::home_dir().unwrap();
+        let dest = home.join(format!(
+            "rutracker-mcp-dispatch-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dest);
+
+        let params = json!({
+            "name": "download_torrent",
+            "arguments": {"topic_id": 12345, "dest_dir": dest.display().to_string()}
+        });
+        let text = dispatch_tool_call(&params, &cfg(&server)).await.unwrap();
+        assert!(
+            text.starts_with("Saved: "),
+            "download_torrent must report 'Saved: <path>', got: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_missing_name_errors() {
+        let server = MockServer::start().await;
+        let params = json!({"arguments": {}});
+        let err = dispatch_tool_call(&params, &cfg(&server))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing 'name'"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_tool_errors() {
+        let server = MockServer::start().await;
+        let params = json!({"name": "not_a_real_tool", "arguments": {}});
+        let err = dispatch_tool_call(&params, &cfg(&server))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_search_missing_query_errors() {
+        let server = MockServer::start().await;
+        let params = json!({"name": "search", "arguments": {}});
+        let err = dispatch_tool_call(&params, &cfg(&server))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing 'query'"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_get_topic_missing_id_errors() {
+        let server = MockServer::start().await;
+        let params = json!({"name": "get_topic", "arguments": {}});
+        let err = dispatch_tool_call(&params, &cfg(&server))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing 'topic_id'"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_browse_forum_missing_category_errors() {
+        let server = MockServer::start().await;
+        let params = json!({"name": "browse_forum", "arguments": {}});
+        let err = dispatch_tool_call(&params, &cfg(&server))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing 'category_id'"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_download_torrent_missing_topic_id_errors() {
+        let server = MockServer::start().await;
+        let params = json!({"name": "download_torrent", "arguments": {"dest_dir": "/tmp/x"}});
+        let err = dispatch_tool_call(&params, &cfg(&server))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing 'topic_id'"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_download_torrent_missing_dest_errors() {
+        let server = MockServer::start().await;
+        let params = json!({"name": "download_torrent", "arguments": {"topic_id": 1}});
+        let err = dispatch_tool_call(&params, &cfg(&server))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing 'dest_dir'"));
+    }
+
+    #[test]
+    fn test_strip_trailing_newline() {
+        assert_eq!(strip_trailing_newline("abc\n"), "abc");
+        assert_eq!(strip_trailing_newline("abc"), "abc");
+        assert_eq!(strip_trailing_newline(""), "");
+    }
+}

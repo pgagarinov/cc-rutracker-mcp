@@ -6,6 +6,10 @@
 # Benchmark / Criterion output
 /target/criterion/
 
+# ---- Coverage (US-008) ----
+/lcov.info
+/coverage-report/
+
 # ---- Project-specific ----
 
 # Cached cookies (contains session tokens)

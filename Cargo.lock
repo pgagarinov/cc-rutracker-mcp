@@ -1834,12 +1834,16 @@ dependencies = [
  "clap",
  "dirs",
  "pretty_assertions",
+ "regex",
+ "rusqlite",
  "rutracker-cookies-macos",
  "rutracker-http",
  "rutracker-mirror",
  "rutracker-parser",
+ "rutracker-ranker",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1886,6 +1890,7 @@ name = "rutracker-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "pretty_assertions",
  "rutracker-cli",
  "rutracker-cookies-macos",
@@ -1935,6 +1940,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "rutracker-ranker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "pretty_assertions",
+ "regex",
+ "rutracker-mirror",
+ "rutracker-parser",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -2076,6 +2099,17 @@ name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",

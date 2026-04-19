@@ -18,6 +18,8 @@ rutracker-parser = { path = "../parser" }
 rutracker-http = { path = "../http" }
 rutracker-cookies-macos = { path = "../cookies-macos" }
 rutracker-mirror = { path = "../mirror" }
+rutracker-ranker = { path = "../ranker" }
+rusqlite.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 tokio.workspace = true
 serde.workspace = true
@@ -33,3 +35,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 wiremock.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
 pretty_assertions.workspace = true
+tempfile = "3"
+regex.workspace = true

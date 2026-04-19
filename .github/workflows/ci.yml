@@ -1,0 +1,103 @@
+# NOTE: The `coverage` job enforces ≥95% line coverage. Coverage tests land in US-008;
+# until then this job will fail by design, blocking merge — that's the guardrail.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    env:
+      # Exclusion regex — kept in sync with .cargo/llvm-cov.toml and the
+      # README "Coverage" section. Edits here MUST be mirrored in both.
+      #   crates/cookies-macos/src/keychain.rs  → live macOS Keychain I/O
+      #   crates/mcp/src/main.rs                → stdio JSON-RPC read loop
+      #   crates/cli/src/main.rs                → thin clap wrapper around cli::lib
+      #   crates/cookies-macos/src/lib.rs       → macOS refresh glue (live Keychain)
+      IGNORE_REGEX: 'crates/cookies-macos/src/keychain\.rs|crates/mcp/src/main\.rs|crates/cli/src/main\.rs|crates/cookies-macos/src/lib\.rs'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: cargo llvm-cov (lcov output)
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info --ignore-filename-regex "$IGNORE_REGEX"
+      - name: Enforce ≥95% line coverage
+        run: |
+          # Extract the line coverage percentage from the summary output.
+          # cargo llvm-cov --summary-only prints a table; the "TOTAL" line contains
+          # "Lines:" followed by count/total and then the percentage, e.g.:
+          #   TOTAL  ...  Lines: 1234/1300  94.92%
+          # We grep that line, pull the last percentage, and compare numerically.
+          SUMMARY=$(cargo llvm-cov --workspace --locked --summary-only --ignore-filename-regex "$IGNORE_REGEX" 2>&1)
+          echo "$SUMMARY"
+          PCT=$(echo "$SUMMARY" | grep -i 'TOTAL' | grep -oE '[0-9]+\.[0-9]+%' | tail -1 | tr -d '%')
+          if [ -z "$PCT" ]; then
+            echo "ERROR: could not parse coverage percentage from summary output."
+            exit 1
+          fi
+          echo "Line coverage: ${PCT}%"
+          # Use awk for floating-point comparison (bc not guaranteed on all runners).
+          PASS=$(awk "BEGIN { print ($PCT >= 95) ? \"yes\" : \"no\" }")
+          if [ "$PASS" != "yes" ]; then
+            echo "FAIL: line coverage ${PCT}% is below the required 95% threshold."
+            exit 1
+          fi
+          echo "OK: line coverage ${PCT}% meets the ≥95% requirement."
+      - name: Upload lcov.info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-report
+          path: lcov.info
+          retention-days: 14

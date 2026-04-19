@@ -4,6 +4,7 @@ members = [
     "crates/http",
     "crates/cookies-macos",
     "crates/mirror",
+    "crates/ranker",
     "crates/cli",
     "crates/mcp",
 ]
@@ -45,6 +46,7 @@ cbc = { version = "0.1", features = ["block-padding", "alloc"] }
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hmac = "0.12"
 sha1 = "0.10"
+sha2 = "0.10"
 base64 = "0.22"
 
 # Testing

@@ -22,6 +22,7 @@ use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
 use tracing_subscriber::{filter, fmt, Layer, Registry};
 
 pub mod paths;
+pub mod rank;
 
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -67,7 +68,7 @@ pub async fn emit(cfg: &CliConfig, output: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-fn render<T: Serialize>(cfg: &CliConfig, value: &T, text: &str) -> Result<String> {
+pub(crate) fn render<T: Serialize>(cfg: &CliConfig, value: &T, text: &str) -> Result<String> {
     match cfg.format {
         OutputFormat::Json => Ok(serde_json::to_string_pretty(value)? + "\n"),
         OutputFormat::Text => Ok(text.to_string() + "\n"),
@@ -248,8 +249,60 @@ pub struct WatchListArgs {
     pub root: Option<PathBuf>,
 }
 
-fn mirror_root(root: Option<&PathBuf>) -> PathBuf {
+pub fn mirror_root_for(root: Option<&PathBuf>) -> PathBuf {
     root.cloned().unwrap_or_else(rutracker_mirror::default_root)
+}
+
+fn mirror_root(root: Option<&PathBuf>) -> PathBuf {
+    mirror_root_for(root)
+}
+
+/// Resolve a forum reference (numeric id or name) against `structure.json`.
+///
+/// - Pure-numeric strings are returned as-is (zero I/O, backward-compatible).
+/// - Name strings load `structure.json` from `root`; if the file is absent the
+///   error message tells the user to run `rutracker mirror structure` first.
+/// - On `Ambiguous`, prints a helpful candidate list and returns `Err`.
+pub fn resolve_forum(root: &std::path::Path, input: &str) -> Result<String> {
+    // Fast path: numeric ids never need structure.json.
+    if input.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(input.to_string());
+    }
+
+    let structure_path = root.join("structure.json");
+    let structure: rutracker_mirror::structure::Structure = match std::fs::read(&structure_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing {}", structure_path.display()))?,
+        Err(_) => {
+            return Err(anyhow!(
+                "structure.json missing — run `rutracker mirror structure` first"
+            ))
+        }
+    };
+
+    rutracker_mirror::resolve_forum_ref(&structure, input).map_err(|e| {
+        use rutracker_mirror::ResolveError;
+        match &e {
+            ResolveError::Ambiguous { query, matches } => {
+                let mut msg = format!(
+                    "ambiguous forum name {:?}\n   did you mean one of:\n",
+                    query
+                );
+                for (id, name) in matches {
+                    msg.push_str(&format!("     [{id}] {name}\n"));
+                }
+                msg.push_str("   (quote the full name or pass the numeric id)");
+                anyhow!("{msg}")
+            }
+            ResolveError::NotFound(q) => anyhow!(
+                "no forum matches {:?}\n   run `rutracker categories` to see available forums",
+                q
+            ),
+            ResolveError::NoStructure => {
+                anyhow!("structure.json missing — run `rutracker mirror structure` first")
+            }
+        }
+    })
 }
 
 pub async fn run_watch_add(cfg: &CliConfig, args: &WatchArgs) -> Result<String> {
@@ -726,12 +779,17 @@ pub async fn run_mirror_rebuild_index(cfg: &CliConfig, args: &MirrorRootArgs) ->
 }
 
 pub mod prelude {
+    pub use super::rank::{
+        run_rank_aggregate, run_rank_list, run_rank_match, run_rank_parse_failures,
+        run_rank_scan_prepare, run_rank_show, RankAggregateArgs, RankListArgs, RankMatchArgs,
+        RankParseFailuresArgs, RankScanPrepareArgs, RankShowArgs,
+    };
     pub use super::{
-        run_browse, run_categories, run_download, run_mirror_init, run_mirror_rebuild_index,
-        run_mirror_show, run_mirror_status, run_mirror_structure, run_mirror_sync, run_search,
-        run_topic, run_watch_add, run_watch_list, run_watch_remove, BrowseArgs, CliConfig,
-        DownloadArgs, MirrorRootArgs, MirrorSyncResult, OutputFormat, SearchArgs, ShowArgs,
-        SyncCliArgs, TopicArgs, WatchArgs, WatchListArgs,
+        mirror_root_for, resolve_forum, run_browse, run_categories, run_download, run_mirror_init,
+        run_mirror_rebuild_index, run_mirror_show, run_mirror_status, run_mirror_structure,
+        run_mirror_sync, run_search, run_topic, run_watch_add, run_watch_list, run_watch_remove,
+        BrowseArgs, CliConfig, DownloadArgs, MirrorRootArgs, MirrorSyncResult, OutputFormat,
+        SearchArgs, ShowArgs, SyncCliArgs, TopicArgs, WatchArgs, WatchListArgs,
     };
 }
 
@@ -1018,6 +1076,10 @@ mod tests {
             opening_post: rutracker_mirror::topic_io::Post::default(),
             comments: Vec::new(),
             metadata: serde_json::Value::Null,
+            size_bytes: None,
+            seeds: None,
+            leeches: None,
+            downloads: None,
         };
         rutracker_mirror::topic_io::write_json_atomic(&topics_dir.join("6843582.json"), &tf)
             .unwrap();
@@ -1094,5 +1156,555 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // ---------- US-008 additional coverage ----------
+
+    fn seed_structure(tmp: &std::path::Path) {
+        let structure = serde_json::json!({
+            "schema_version": 1,
+            "groups": [{
+                "group_id": "1",
+                "title": "Кино",
+                "forums": [
+                    {"forum_id": "252", "name": "Зарубежные фильмы", "parent_id": null},
+                    {"forum_id": "251", "name": "Отечественные фильмы", "parent_id": null},
+                ]
+            }],
+            "fetched_at": null
+        });
+        std::fs::write(
+            tmp.join("structure.json"),
+            serde_json::to_vec_pretty(&structure).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_resolve_forum_numeric_passthrough() {
+        let tmp = tempdir_unique("resolve-numeric");
+        // No structure.json — numeric inputs must not touch disk.
+        let out = resolve_forum(&tmp, "252").unwrap();
+        assert_eq!(out, "252");
+    }
+
+    #[test]
+    fn test_resolve_forum_missing_structure_errors() {
+        let tmp = tempdir_unique("resolve-missing");
+        let err = resolve_forum(&tmp, "Зарубежные").unwrap_err();
+        assert!(
+            err.to_string().contains("structure.json missing"),
+            "error should mention missing structure.json: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_forum_not_found_errors() {
+        let tmp = tempdir_unique("resolve-notfound");
+        seed_structure(&tmp);
+        let err = resolve_forum(&tmp, "Марсианский").unwrap_err();
+        assert!(
+            err.to_string().contains("no forum matches"),
+            "error should say 'no forum matches': {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_forum_ambiguous_errors() {
+        let tmp = tempdir_unique("resolve-ambig");
+        seed_structure(&tmp);
+        // Both "Зарубежные фильмы" and "Отечественные фильмы" contain "фильмы".
+        let err = resolve_forum(&tmp, "фильмы").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ambiguous"),
+            "expected ambiguous error, got: {msg}"
+        );
+        assert!(msg.contains("252") || msg.contains("251"));
+    }
+
+    #[test]
+    fn test_mirror_root_for_default_when_none() {
+        // When None, falls back to rutracker_mirror::default_root().
+        let got = mirror_root_for(None);
+        let expected = rutracker_mirror::default_root();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_mirror_root_for_override() {
+        let override_path = PathBuf::from("/tmp/custom-mirror-root");
+        let got = mirror_root_for(Some(&override_path));
+        assert_eq!(got, override_path);
+    }
+
+    #[tokio::test]
+    async fn test_watch_add_missing_structure_errors() {
+        // run_watch_add should fail with a helpful error when structure.json is absent.
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("watch-add-missing-struct");
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let err = run_watch_add(
+            &cfg,
+            &WatchArgs {
+                forum_id: "252".into(),
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mirror init") || msg.contains("structure"),
+            "expected init/structure hint, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_watch_remove_removes_entry() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("watch-remove");
+        seed_structure(&tmp);
+        let cfg = config_for(&server, OutputFormat::Json, None);
+
+        // Add then remove.
+        run_watch_add(
+            &cfg,
+            &WatchArgs {
+                forum_id: "252".into(),
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let after_remove = run_watch_remove(
+            &cfg,
+            &WatchArgs {
+                forum_id: "252".into(),
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        let v: serde_json::Value = serde_json::from_str(after_remove.trim()).unwrap();
+        assert_eq!(v["forums"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_watch_list_empty_returns_empty_array() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("watch-list-empty");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_watch_list(
+            &cfg,
+            &WatchListArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["forums"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_watch_list_text_mode_shows_empty_hint() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("watch-list-text");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+        let cfg = config_for(&server, OutputFormat::Text, None);
+        let out = run_watch_list(
+            &cfg,
+            &WatchListArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            out.contains("(watchlist empty)"),
+            "expected empty-hint, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mirror_init_creates_state_db() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("mirror-init");
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_mirror_init(
+            &cfg,
+            &MirrorRootArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert!(v["initialized"].as_bool().unwrap());
+        assert!(tmp.join("state.db").exists());
+        assert!(tmp.join("structure.json").exists());
+        assert!(tmp.join("watchlist.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_mirror_structure_writes_file() {
+        const INDEX_FIXTURE: &[u8] =
+            include_bytes!("../../parser/tests/fixtures/index-sample.html");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/forum/index.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(INDEX_FIXTURE.to_vec()))
+            .mount(&server)
+            .await;
+        let tmp = tempdir_unique("mirror-structure");
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_mirror_structure(
+            &cfg,
+            &MirrorRootArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert!(!v["groups"].as_array().unwrap().is_empty());
+        assert!(tmp.join("structure.json").exists());
+    }
+
+    #[tokio::test]
+    async fn test_mirror_rebuild_index_zero_on_empty() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("mirror-rebuild-empty");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_mirror_rebuild_index(
+            &cfg,
+            &MirrorRootArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["inserted"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_mirror_rebuild_index_after_seeded_json() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("mirror-rebuild-seeded");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+        let topics_dir = tmp.join("forums").join("252").join("topics");
+        std::fs::create_dir_all(&topics_dir).unwrap();
+        for tid in ["100", "101"] {
+            let tf = rutracker_mirror::topic_io::TopicFile {
+                schema_version: 1,
+                topic_id: tid.into(),
+                forum_id: "252".into(),
+                title: format!("Title {}", tid),
+                fetched_at: "2026-04-18T12:00:00+00:00".into(),
+                last_post_id: 500,
+                last_post_at: "2026-04-18T12:00:00+00:00".into(),
+                opening_post: rutracker_mirror::topic_io::Post::default(),
+                comments: Vec::new(),
+                metadata: serde_json::Value::Null,
+                size_bytes: None,
+                seeds: None,
+                leeches: None,
+                downloads: None,
+            };
+            rutracker_mirror::topic_io::write_json_atomic(
+                &topics_dir.join(format!("{tid}.json")),
+                &tf,
+            )
+            .unwrap();
+        }
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_mirror_rebuild_index(
+            &cfg,
+            &MirrorRootArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["inserted"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_mirror_show_missing_topic_errors() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("show-missing");
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let err = run_mirror_show(
+            &cfg,
+            &ShowArgs {
+                root: Some(tmp.clone()),
+                forum_id: "252".into(),
+                topic_id: "9999".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reading topic file") || msg.contains("No such file"),
+            "expected file-not-found wrap, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mirror_status_empty() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("status-empty");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let out = run_mirror_status(
+            &cfg,
+            &MirrorRootArgs {
+                root: Some(tmp.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["forums"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_emit_writes_to_out_file() {
+        // Direct test of emit() writing when cfg.out is Some.
+        let tmp = tempdir_unique("emit-out-file");
+        let out_path = tmp.join("sink.json");
+        let cfg = CliConfig {
+            base_url: "https://example.test/forum/".into(),
+            format: OutputFormat::Json,
+            out: Some(out_path.clone()),
+            cookies: std::collections::HashMap::new(),
+            emit_stdout: false,
+        };
+        let result = emit(&cfg, "hello").await.unwrap();
+        assert_eq!(result, Some(out_path.clone()));
+        let content = tokio::fs::read_to_string(&out_path).await.unwrap();
+        assert_eq!(content, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_mirror_sync_with_empty_watchlist() {
+        // Sync with no forums returns empty forums_ok / forums_failed.
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("sync-empty");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let result = run_mirror_sync(
+            &cfg,
+            &SyncCliArgs {
+                root: Some(tmp.clone()),
+                forums: Vec::new(),
+                max_topics: 5,
+                rate_rps: 1.0,
+                max_attempts_per_forum: 1,
+                cooldown_wait: false,
+                log_file: Some("".into()), // disable file logging
+                force_full: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        let v: serde_json::Value = serde_json::from_str(result.output.trim()).unwrap();
+        assert_eq!(v["forums_ok"].as_array().unwrap().len(), 0);
+        assert_eq!(v["forums_failed"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_mirror_sync_log_file_stderr_sigil() {
+        // log_file = "-" should route to stderr (no panic, no file created).
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("sync-stderr-log");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let result = run_mirror_sync(
+            &cfg,
+            &SyncCliArgs {
+                root: Some(tmp.clone()),
+                forums: Vec::new(),
+                max_topics: 5,
+                rate_rps: 1.0,
+                max_attempts_per_forum: 1,
+                cooldown_wait: false,
+                log_file: Some("-".into()),
+                force_full: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        // no logs/ subdir created because log_file="-" routes to stderr
+        assert!(!tmp.join("logs").exists(), "no sync log dir should exist");
+    }
+
+    #[tokio::test]
+    async fn test_mirror_sync_log_file_custom_path() {
+        // Custom log path should be created (parent dir too).
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("sync-custom-log");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+
+        let log_path = tmp.join("custom-logs").join("my.log");
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        run_mirror_sync(
+            &cfg,
+            &SyncCliArgs {
+                root: Some(tmp.clone()),
+                forums: Vec::new(),
+                max_topics: 5,
+                rate_rps: 1.0,
+                max_attempts_per_forum: 1,
+                cooldown_wait: false,
+                log_file: Some(log_path.display().to_string()),
+                force_full: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(log_path.exists(), "custom log path must be created");
+    }
+
+    #[tokio::test]
+    async fn test_mirror_sync_with_forum_processes_and_renders_summary() {
+        // Wire a minimal viewforum.php that returns a forum listing with 1 topic
+        // and a viewtopic.php that returns a single-page topic. This should exercise
+        // the `args.forums.clone()` path, `forums_ok` iteration, and the success
+        // summary rendering.
+        let server = MockServer::start().await;
+        let forum_body = r#"<!DOCTYPE html><html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewforum.php?f=252">
+<title>Forum 252</title></head><body>
+<table class="vf-tor"><tbody>
+<tr class="hl-tr" data-topic_id="9001">
+  <td class="vf-col-t-title"><a class="tt-text" href="viewtopic.php?t=9001">Topic 9001</a></td>
+  <td class="u-name-col"><a>author</a></td>
+  <td class="tor-size"><u>100</u> MB</td>
+  <td><b class="seedmed">5</b></td>
+  <td class="leechmed">2</td>
+  <td class="vf-col-last-post"><p>18-Apr-26 12:00</p><p><a href="viewtopic.php?p=1000001#1000001">link</a></p></td>
+</tr>
+</tbody></table></body></html>"#;
+        let topic_body = r##"<!DOCTYPE html><html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewtopic.php?t=9001">
+<title>Topic 9001</title></head><body>
+<h1 id="topic-title">Test topic 9001</h1>
+<a class="magnet-link" href="magnet:?xt=urn:btih:dummy9001">Magnet</a>
+<span id="tor-size-humn">100 MB</span>
+<span class="seed"><b>5</b></span>
+<span class="leech"><b>2</b></span>
+<table><tbody id="post_19001">
+<tr><td><p class="nick">author</p><a class="p-link small" href="#">18-Apr-26 12:00</a><div class="post_body">Description</div></td></tr>
+</tbody></table></body></html>"##;
+
+        Mock::given(method("GET"))
+            .and(path("/forum/viewforum.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(forum_body.to_string()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forum/viewtopic.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(topic_body.to_string()))
+            .mount(&server)
+            .await;
+
+        let tmp = tempdir_unique("sync-forum-ok");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        let result = run_mirror_sync(
+            &cfg,
+            &SyncCliArgs {
+                root: Some(tmp.clone()),
+                forums: vec!["252".into()],
+                max_topics: 5,
+                rate_rps: 10.0,
+                max_attempts_per_forum: 2,
+                cooldown_wait: false,
+                log_file: Some("".into()),
+                force_full: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+
+        let v: serde_json::Value = serde_json::from_str(result.output.trim()).unwrap();
+        let ok = v["forums_ok"].as_array().unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0]["forum_id"].as_str().unwrap(), "252");
+        assert_eq!(v["forums_failed"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_mirror_sync_text_mode_renders_forums_ok_rows() {
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("sync-text-ok");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+        // Empty forums list => driver returns empty summary; text render path
+        // is exercised but with 0 rows.
+        let cfg = config_for(&server, OutputFormat::Text, None);
+        let result = run_mirror_sync(
+            &cfg,
+            &SyncCliArgs {
+                root: Some(tmp.clone()),
+                forums: Vec::new(),
+                max_topics: 5,
+                rate_rps: 1.0,
+                max_attempts_per_forum: 1,
+                cooldown_wait: false,
+                log_file: Some("".into()),
+                force_full: false,
+            },
+        )
+        .await
+        .unwrap();
+        // Text output is just "\n" (empty body + trailing newline).
+        assert!(result.output.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn test_mirror_sync_default_log_file_goes_to_logs_dir() {
+        // log_file = None => default path under <root>/logs.
+        let server = MockServer::start().await;
+        let tmp = tempdir_unique("sync-default-log");
+        rutracker_mirror::Mirror::init(&tmp).unwrap();
+
+        let cfg = config_for(&server, OutputFormat::Json, None);
+        run_mirror_sync(
+            &cfg,
+            &SyncCliArgs {
+                root: Some(tmp.clone()),
+                forums: Vec::new(),
+                max_topics: 5,
+                rate_rps: 1.0,
+                max_attempts_per_forum: 1,
+                cooldown_wait: false,
+                log_file: None,
+                force_full: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(tmp.join("logs").is_dir(), "logs dir should be created");
+        // At least one *.log file inside.
+        let entries: Vec<_> = std::fs::read_dir(tmp.join("logs"))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(!entries.is_empty(), "logs dir should contain >= 1 file");
     }
 }
