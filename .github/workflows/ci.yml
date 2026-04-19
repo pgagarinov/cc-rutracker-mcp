@@ -59,7 +59,7 @@ jobs:
       # README "Coverage" section. Edits here MUST be mirrored in both.
       #   crates/cookies-macos/src/keychain.rs  → live macOS Keychain I/O
       #   crates/mcp/src/main.rs                → stdio JSON-RPC read loop
-      #   crates/cli/src/main.rs                → thin clap wrapper around cli::lib
+      #   crates/cli/src/main.rs                → thin entrypoint; real logic in cli::dispatch
       #   crates/cookies-macos/src/lib.rs       → macOS refresh glue (live Keychain)
       IGNORE_REGEX: 'crates/cookies-macos/src/keychain\.rs|crates/mcp/src/main\.rs|crates/cli/src/main\.rs|crates/cookies-macos/src/lib\.rs'
     steps:

@@ -110,7 +110,7 @@ Excluded paths and rationale:
 |---|---|
 | `crates/cookies-macos/src/keychain.rs` | Live macOS Keychain lookup — only reachable via the `#[ignore]`'d live test. |
 | `crates/mcp/src/main.rs` | `rutracker-mcp` stdio read loop — exercised only via a real MCP client session. |
-| `crates/cli/src/main.rs` | Thin clap dispatch wrapper — all logic lives in `crates/cli/src/lib.rs` and `rank.rs`. |
+| `crates/cli/src/main.rs` | Genuinely thin `rutracker` entrypoint (~25 lines: `Cli::parse` → tracing init → `build_cfg` → `dispatch` → exit-code). Argument types, cookie loading, cfg construction, and subcommand dispatch live in `crates/cli/src/dispatch.rs` and are directly unit-tested there. |
 | `crates/cookies-macos/src/lib.rs` | macOS-only refresh glue that requires a live Keychain prompt. |
 
 ## Local mirror

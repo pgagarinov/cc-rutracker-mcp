@@ -284,6 +284,24 @@ pub fn load_brave_cookies(profile: &str) -> Result<HashMap<String, String>> {
     }
 }
 
+/// Resolve a required forum reference (name or id) against `structure.json`
+/// under `root`. Wraps the resolver error with a uniform `"resolving forum"`
+/// context so every dispatch arm surfaces the same message shape.
+fn resolve_required_forum(root: Option<&PathBuf>, input: &str) -> Result<String> {
+    let mirror_root = mirror_root_for(root);
+    resolve_forum(&mirror_root, input).context("resolving forum")
+}
+
+/// Resolve an optional forum reference: `None` passes through, `Some(name)`
+/// is resolved via [`resolve_required_forum`]. Used by `rank` commands where
+/// `--forum` is optional.
+fn resolve_optional_forum(root: Option<&PathBuf>, input: Option<String>) -> Result<Option<String>> {
+    match input {
+        Some(f) => resolve_required_forum(root, &f).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Top-level dispatch. Returns the process exit code (0 on success, non-zero
 /// when `mirror sync` reports a partial failure). Errors propagate as
 /// `Err(anyhow)` — the caller (main or a test) decides how to surface them.
@@ -383,15 +401,13 @@ async fn dispatch_mirror(cmd: MirrorCmd, cfg: &CliConfig) -> Result<i32> {
         }
         MirrorCmd::Watch { cmd } => match cmd {
             WatchCmd::Add { forum_id, root } => {
-                let mirror_root = mirror_root_for(root.as_ref());
-                let forum_id = resolve_forum(&mirror_root, &forum_id).context("resolving forum")?;
+                let forum_id = resolve_required_forum(root.as_ref(), &forum_id)?;
                 run_watch_add(cfg, &WatchArgs { forum_id, root })
                     .await
                     .context("watch add failed")?;
             }
             WatchCmd::Remove { forum_id, root } => {
-                let mirror_root = mirror_root_for(root.as_ref());
-                let forum_id = resolve_forum(&mirror_root, &forum_id).context("resolving forum")?;
+                let forum_id = resolve_required_forum(root.as_ref(), &forum_id)?;
                 run_watch_remove(cfg, &WatchArgs { forum_id, root })
                     .await
                     .context("watch remove failed")?;
@@ -439,8 +455,7 @@ async fn dispatch_mirror(cmd: MirrorCmd, cfg: &CliConfig) -> Result<i32> {
             let (forum_ref, topic_id) = target
                 .split_once('/')
                 .ok_or_else(|| anyhow::anyhow!("expected <forum_id>/<topic_id>, got {target}"))?;
-            let mirror_root = mirror_root_for(root.as_ref());
-            let forum_id = resolve_forum(&mirror_root, forum_ref).context("resolving forum")?;
+            let forum_id = resolve_required_forum(root.as_ref(), forum_ref)?;
             run_mirror_show(
                 cfg,
                 &ShowArgs {
@@ -469,12 +484,7 @@ async fn dispatch_mirror(cmd: MirrorCmd, cfg: &CliConfig) -> Result<i32> {
 async fn dispatch_rank(cmd: RankCmd, cfg: &CliConfig) -> Result<()> {
     match cmd {
         RankCmd::Match { forum, root } => {
-            let forum = if let Some(f) = forum {
-                let mirror_root = mirror_root_for(root.as_ref());
-                Some(resolve_forum(&mirror_root, &f).context("resolving forum")?)
-            } else {
-                None
-            };
+            let forum = resolve_optional_forum(root.as_ref(), forum)?;
             run_rank_match(cfg, &RankMatchArgs { forum, root })
                 .await
                 .context("rank match failed")?;
@@ -484,8 +494,7 @@ async fn dispatch_rank(cmd: RankCmd, cfg: &CliConfig) -> Result<()> {
             max_payload_bytes,
             root,
         } => {
-            let mirror_root = mirror_root_for(root.as_ref());
-            let forum = resolve_forum(&mirror_root, &forum).context("resolving forum")?;
+            let forum = resolve_required_forum(root.as_ref(), &forum)?;
             run_rank_scan_prepare(
                 cfg,
                 &RankScanPrepareArgs {
@@ -498,12 +507,7 @@ async fn dispatch_rank(cmd: RankCmd, cfg: &CliConfig) -> Result<()> {
             .context("rank scan-prepare failed")?;
         }
         RankCmd::Aggregate { forum, root } => {
-            let forum = if let Some(f) = forum {
-                let mirror_root = mirror_root_for(root.as_ref());
-                Some(resolve_forum(&mirror_root, &f).context("resolving forum")?)
-            } else {
-                None
-            };
+            let forum = resolve_optional_forum(root.as_ref(), forum)?;
             run_rank_aggregate(cfg, &RankAggregateArgs { forum, root })
                 .await
                 .context("rank aggregate failed")?;
@@ -514,12 +518,7 @@ async fn dispatch_rank(cmd: RankCmd, cfg: &CliConfig) -> Result<()> {
             top,
             root,
         } => {
-            let forum = if let Some(f) = forum {
-                let mirror_root = mirror_root_for(root.as_ref());
-                Some(resolve_forum(&mirror_root, &f).context("resolving forum")?)
-            } else {
-                None
-            };
+            let forum = resolve_optional_forum(root.as_ref(), forum)?;
             run_rank_list(
                 cfg,
                 &RankListArgs {
