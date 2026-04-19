@@ -19,11 +19,12 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# `dirs` is used cross-platform by `cache.rs` — not target-gated.
+dirs = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 rusqlite.workspace = true
 security-framework = "3"
-dirs = "5"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
