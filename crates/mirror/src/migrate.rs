@@ -232,6 +232,47 @@ mod tests {
         assert_eq!(count, 0, "film_index must not exist after rollback");
     }
 
+    /// US-008: a `schema_meta` row whose `value` is not a string (e.g.
+    /// `NULL` or a blob) causes `r.get::<_, String>(0)` to fail with a
+    /// non-`NoRows` error. That must surface as a SQLite error, not a
+    /// silent zero version. Covers L59–L61.
+    #[test]
+    fn test_read_db_version_non_string_value_surfaces_sqlite_error() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("state.db");
+        let conn = Connection::open(&path).unwrap();
+        // Set up schema_meta with a BLOB value instead of TEXT.
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value BLOB); \
+             INSERT INTO schema_meta (key, value) VALUES ('schema_version', x'deadbeef');",
+        )
+        .unwrap();
+        drop(conn);
+        let conn = Connection::open(&path).unwrap();
+        let err = read_db_version(&conn).expect_err("blob value must error");
+        assert!(
+            matches!(err, Error::Sqlite(_)),
+            "expected Sqlite error for non-string schema value, got: {err:?}"
+        );
+    }
+
+    /// US-008: `ensure_schema` on a brand-new empty DB (no schema_meta
+    /// table) must succeed by applying all migrations in order. Confirms
+    /// the bootstrap path from `read_db_version == 0`.
+    #[test]
+    fn test_ensure_schema_bootstraps_from_empty_db() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("state.db");
+        let mut conn = Connection::open(&path).unwrap();
+        // Do NOT create schema_meta manually.
+        ensure_schema(&mut conn).expect("bootstrap must succeed");
+        let v = read_db_version(&conn).unwrap();
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "all migrations must land DB at current SCHEMA_VERSION"
+        );
+    }
+
     #[test]
     fn test_newer_db_still_refused_with_actionable_error() {
         let td = TempDir::new().unwrap();

@@ -1620,4 +1620,130 @@ mod tests {
         // Only the valid film is scored; bad-json topic is silently skipped.
         assert_eq!(v["films_scored"].as_u64().unwrap(), 1);
     }
+
+    /// US-008: `run_rank_match` tolerates a forum whose topics directory
+    /// does not exist on disk — covers the `if !topics_dir.is_dir()` skip
+    /// at rank.rs L184–L186. The forum is added to the watchlist but no
+    /// topics have been mirrored yet.
+    #[tokio::test]
+    async fn test_run_rank_match_skips_forum_without_topics_dir() {
+        let _td = tempdir_unique("match-no-topics-dir");
+        let root = _td.path().to_path_buf();
+        init_mirror(&root);
+        // Add forum 252 to watchlist but DON'T create forums/252/topics/.
+        let wl = rutracker_mirror::config::Watchlist {
+            schema_version: 1,
+            forums: vec![rutracker_mirror::config::WatchlistEntry {
+                forum_id: "252".into(),
+                name: "Тест".into(),
+                added_at: "2026-04-18T12:00:00+00:00".into(),
+            }],
+        };
+        rutracker_mirror::watchlist::save(&root, &wl).unwrap();
+
+        let cfg = cfg_for_test();
+        let out = run_rank_match(
+            &cfg,
+            &RankMatchArgs {
+                forum: None, // no explicit forum → use watchlist + on-disk
+                root: Some(root.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["topics_seen"].as_u64().unwrap(), 0);
+        assert_eq!(v["topics_inserted_or_updated"].as_u64().unwrap(), 0);
+        assert_eq!(v["parse_failures"].as_u64().unwrap(), 0);
+    }
+
+    /// US-008: `run_rank_match` handles malformed JSON topic files by
+    /// counting them as a parse failure, appending them to the parse-
+    /// failures log, and continuing. Covers rank.rs L213–L218.
+    #[tokio::test]
+    async fn test_run_rank_match_parse_failure_for_malformed_json() {
+        let _td = tempdir_unique("match-bad-json");
+        let root = _td.path().to_path_buf();
+        init_mirror(&root);
+        // One valid topic + one corrupt topic.
+        write_topic_json(
+            &root,
+            "252",
+            "1001",
+            "Valid / Film V (Director) [2025, США, драма, WEB-DLRip] Dub",
+            10,
+        );
+        let topics_dir = root.join("forums").join("252").join("topics");
+        std::fs::write(topics_dir.join("2002.json"), b"{not valid json").unwrap();
+
+        let cfg = cfg_for_test();
+        let out = run_rank_match(
+            &cfg,
+            &RankMatchArgs {
+                forum: Some("252".into()),
+                root: Some(root.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(
+            v["topics_seen"].as_u64().unwrap(),
+            2,
+            "both files count as seen"
+        );
+        assert_eq!(v["topics_inserted_or_updated"].as_u64().unwrap(), 1);
+        assert_eq!(v["parse_failures"].as_u64().unwrap(), 1);
+
+        // The parse-failures log must exist and mention topic 2002 with a JSON error tag.
+        let log = std::fs::read_to_string(parse_failures_log_path(&root)).unwrap();
+        assert!(
+            log.contains("2002"),
+            "parse-failures log must cite topic 2002: {log}"
+        );
+        assert!(
+            log.contains("<json error>"),
+            "parse-failures log must tag as <json error>: {log}"
+        );
+    }
+
+    /// US-008: `run_rank_match` counts unparseable titles as parse failures
+    /// (rank.rs L221–L225). A topic with a title that `parse_title` rejects
+    /// (no bracket block) must increment parse_failures and log a row.
+    #[tokio::test]
+    async fn test_run_rank_match_parse_failure_for_unparseable_title() {
+        let _td = tempdir_unique("match-bad-title");
+        let root = _td.path().to_path_buf();
+        init_mirror(&root);
+        // A title with no `[…]` bracket block triggers NoBracketBlock.
+        write_topic_json(&root, "252", "3003", "Just a title with no metadata", 5);
+
+        let cfg = cfg_for_test();
+        let out = run_rank_match(
+            &cfg,
+            &RankMatchArgs {
+                forum: Some("252".into()),
+                root: Some(root.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(v["topics_inserted_or_updated"].as_u64().unwrap(), 0);
+        assert_eq!(v["parse_failures"].as_u64().unwrap(), 1);
+
+        // Confirm `run_rank_parse_failures` reports it and its forum/topic id.
+        let out_pf = run_rank_parse_failures(
+            &cfg,
+            &RankParseFailuresArgs {
+                root: Some(root.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            out_pf.contains("3003"),
+            "parse_failures output must cite topic: {out_pf}"
+        );
+    }
 }

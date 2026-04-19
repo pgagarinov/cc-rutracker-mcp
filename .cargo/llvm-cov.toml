@@ -24,7 +24,7 @@ reason = "`rutracker-mcp` stdio JSON-RPC read loop. Only reachable via a live MC
 
 [[excludes]]
 path   = "crates/cli/src/main.rs"
-reason = "`rutracker` clap dispatch wrapper. Only reachable via a subprocess spawn. All handler logic lives in crates/cli/src/lib.rs + rank.rs and is directly unit-tested."
+reason = "Genuinely thin binary entrypoint (~25 lines): `Cli::parse`, tracing init, exit-code propagation. All argument types, cookie loading, cfg construction, and subcommand dispatch live in `crates/cli/src/dispatch.rs` and are directly unit-tested there. `main.rs` itself is reachable only via a subprocess spawn, so it cannot be unit-tested in-process."
 
 [[excludes]]
 path   = "crates/cookies-macos/src/lib.rs"

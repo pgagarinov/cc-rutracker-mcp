@@ -91,4 +91,34 @@ mod tests {
             Some(first_group_with_forums.group_id.as_str())
         );
     }
+
+    /// US-008: within a category, `<a href="viewforum.php?f=…">` links with
+    /// malformed / missing `f=<digits>` captures must be silently skipped by
+    /// the `let Some(captures) = … else { continue; }` branch (L29). Also
+    /// covers L34 — anchor with empty link text must be skipped.
+    #[test]
+    fn test_category_skips_links_without_forum_id_regex_match() {
+        let html = r#"<!DOCTYPE html>
+<html><body>
+<div class="category" id="cat-1">
+  <h3 class="cat_title">Cat One</h3>
+  <!-- matches the selector (href contains viewforum.php?f=) but the regex wants f=<digits> -->
+  <a href="viewforum.php?f=NOT_A_NUMBER">bad-id</a>
+  <!-- empty name — must be skipped via the `if name.is_empty()` guard -->
+  <a href="viewforum.php?f=1"></a>
+  <!-- good entry -->
+  <a href="viewforum.php?f=2">Фильмы</a>
+</div>
+</body></html>"#;
+        let groups = parse_forum_index(html).unwrap();
+        assert_eq!(groups.len(), 1);
+        let forums = &groups[0].forums;
+        assert_eq!(
+            forums.len(),
+            1,
+            "only the well-formed, non-empty-name link must be kept"
+        );
+        assert_eq!(forums[0].forum_id, "2");
+        assert_eq!(forums[0].name, "Фильмы");
+    }
 }

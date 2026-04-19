@@ -47,6 +47,38 @@ Quality gates:
   cargo fmt --all -- --check                   ✔  clean
   cargo llvm-cov --workspace --summary-only …  ✔  95.08% ≥ 95%
 
+ITERATION 2 (after codex critic REJECT on: (a) skill_drift parser only
+matched inline backticks, (b) main.rs exclusion rationale too broad for
+the amount of logic actually in main.rs)
+----------------------------------------------------------------
+Fixes applied:
+  1. crates/cli/tests/skill_drift.rs — the skill-side extractor now parses
+     BOTH inline `` `rutracker …` `` code spans AND fenced shell blocks
+     (```bash / ```sh / raw ```). `normalise_command` stops at shell
+     operators (`|`, `&&`, `;`, `>`, `<`) and comments.
+  2. crates/cli/src/main.rs refactored to a genuinely thin ~25-line entry
+     point. All argument types, cookie loading, cfg construction, and
+     subcommand dispatch moved to `crates/cli/src/dispatch.rs` with 22 new
+     unit tests (build_cfg variants, is_mirror_sync/needs_cookies helpers,
+     dispatch_mirror/dispatch_rank local-only paths end-to-end).
+  3. .cargo/llvm-cov.toml rationale for `crates/cli/src/main.rs` updated
+     to describe its new, honest role: Cli::parse → tracing init → exit
+     code propagation only.
+  4. crates/cookies-macos/src/cache.rs — the two env-var-mutating tests
+     now take a module-level `ENV_MUTEX` before touching
+     `RUTRACKER_COOKIE_CACHE`. Fixes a coverage-time flake where the two
+     tests raced against each other under cargo-llvm-cov's default thread
+     count.
+
+Post-refactor numbers (same --ignore-filename-regex, now with
+`main.rs` honestly thin and `dispatch.rs` in coverage):
+  TOTAL lines: 10200  missed: 448  line coverage: 95.61%
+  TOTAL functions: 1054 missed: 46 function coverage: 95.64%
+  TOTAL regions: 16699 missed: 978 region coverage: 94.14%
+
+Test count: 221 → ≥301 total (exact count varies by run; includes the 22
+new dispatch.rs tests and the ENV_MUTEX-scoped env-var tests).
+
 Notable coverage improvements by file:
   cli/src/lib.rs        67.48% →  94.2%   (run_watch_remove, mirror init/structure/status/rebuild-index, sync paths, resolve_forum errors, emit() tests, log-file routing)
   cli/src/rank.rs       63.54% →  95.0%   (run_rank_show, run_rank_parse_failures, run_rank_scan_prepare, forum_ids_for union, parse-failure log path)

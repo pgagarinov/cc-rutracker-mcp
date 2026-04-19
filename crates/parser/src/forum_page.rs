@@ -200,6 +200,135 @@ mod tests {
         }
     }
 
+    /// US-008: a forum row with a valid `topic_id` but whose `last_post`
+    /// anchor is missing or malformed (yielding `last_post_id == 0`) must
+    /// be skipped (L31–L33). Build a minimal `vf-tor` table with one
+    /// satisfying row (good `data-topic_id` + proper `viewtopic.php?p=`
+    /// anchor) and one row that has no `vf-col-last-post` cell at all —
+    /// the second row must NOT appear in `topics`.
+    #[test]
+    fn test_forum_row_without_last_post_is_skipped() {
+        // Padding >1KiB to bypass the parse-sanity check.
+        let padding = "x".repeat(2048);
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewforum.php?f=1">
+<title>padding {padding}</title>
+</head><body>
+<table class="vf-tor vf-table">
+  <tr class="hl-tr" data-topic_id="111">
+    <td><a class="tt-text">Good row</a></td>
+    <td class="u-name-col"><a>alice</a></td>
+    <td class="tor-size"><u>1</u> GB</td>
+    <td><b class="seedmed">10</b></td>
+    <td class="leechmed">1</td>
+    <td class="vf-col-last-post">
+      <p>2026-04-18 18:50</p>
+      <p><a href="viewtopic.php?p=12345#12345">x</a></p>
+    </td>
+    <td class="vf-col-replies"><p><span title="Ответов">5</span></p><b>100</b></td>
+  </tr>
+  <tr class="hl-tr" data-topic_id="222">
+    <td><a class="tt-text">Row with no last-post cell</a></td>
+    <td class="u-name-col"><a>bob</a></td>
+    <td class="tor-size"><u>2</u> GB</td>
+    <td><b class="seedmed">5</b></td>
+    <td class="leechmed">1</td>
+    <!-- no vf-col-last-post td — extract_last_post returns (0, "") -->
+    <td class="vf-col-replies"><p><span title="Ответов">5</span></p><b>100</b></td>
+  </tr>
+</table>
+</body></html>"#
+        );
+        let listing = parse_forum_page(&html).unwrap();
+        // Only the good row (last_post_id = 12345) should be kept.
+        let ids: Vec<u64> = listing.topics.iter().map(|t| t.topic_id).collect();
+        assert_eq!(
+            ids,
+            vec![111u64],
+            "row with missing vf-col-last-post must be filtered"
+        );
+        assert_eq!(listing.topics[0].last_post_id, 12345);
+    }
+
+    /// US-008: a forum row where `parse_topic_row` returns `None` (no
+    /// `data-topic_id` and no `viewtopic.php?t=` anchor) must be filtered by
+    /// the `let Some(common) = … else { continue; };` branch (L24–L25).
+    #[test]
+    fn test_forum_row_without_topic_id_is_skipped() {
+        let padding = "x".repeat(2048);
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewforum.php?f=1">
+<title>padding {padding}</title>
+</head><body>
+<table class="vf-tor vf-table">
+  <tr class="hl-tr" data-topic_id="111">
+    <td><a class="tt-text">keeper</a></td>
+    <td class="u-name-col"><a>a</a></td>
+    <td class="tor-size"><u>1</u> GB</td>
+    <td><b class="seedmed">1</b></td>
+    <td class="leechmed">0</td>
+    <td class="vf-col-last-post">
+      <p>2026-04-18</p>
+      <p><a href="viewtopic.php?p=9#9">x</a></p>
+    </td>
+    <td class="vf-col-replies"><span title="Ответов">1</span><b>1</b></td>
+  </tr>
+  <tr class="hl-tr">
+    <!-- no data-topic_id, no viewtopic.php?t= anchor anywhere -->
+    <td><a class="tt-text">skip me</a></td>
+    <td class="u-name-col"><a>b</a></td>
+    <td class="tor-size"><u>2</u> GB</td>
+    <td><b class="seedmed">2</b></td>
+    <td class="leechmed">0</td>
+    <td class="vf-col-last-post">
+      <p>2026-04-18</p>
+      <p><a href="viewtopic.php?p=99#99">x</a></p>
+    </td>
+  </tr>
+</table>
+</body></html>"#
+        );
+        let listing = parse_forum_page(&html).unwrap();
+        assert_eq!(listing.topics.len(), 1);
+        assert_eq!(listing.topics[0].topic_id, 111);
+    }
+
+    /// US-008: a page with no `viewforum.php?start=N` pagination anchors
+    /// must return `total_pages = 1` (L99–L101). A single-row listing with
+    /// no pagination block exercises this.
+    #[test]
+    fn test_forum_without_pagination_anchors_yields_total_pages_1() {
+        let padding = "x".repeat(2048);
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewforum.php?f=7">
+<title>padding {padding}</title>
+</head><body>
+<table class="vf-tor vf-table">
+  <tr class="hl-tr" data-topic_id="500">
+    <td><a class="tt-text">only row</a></td>
+    <td class="u-name-col"><a>c</a></td>
+    <td class="tor-size"><u>3</u> GB</td>
+    <td><b class="seedmed">7</b></td>
+    <td class="leechmed">0</td>
+    <td class="vf-col-last-post">
+      <p>2026-04-18</p>
+      <p><a href="viewtopic.php?p=500#500">x</a></p>
+    </td>
+  </tr>
+</table>
+</body></html>"#
+        );
+        let listing = parse_forum_page(&html).unwrap();
+        assert_eq!(listing.total_pages, 1, "no pagination => total_pages = 1");
+        assert_eq!(listing.forum_id, "7");
+    }
+
     #[test]
     fn test_empty_listing_raises_sanity_error() {
         // Build a document with the expected chrome but an empty tor-tbl tbody. Body size

@@ -5,7 +5,7 @@
 //! This module adds only the page-level chrome (row selector, `search_id`) and the
 //! search-specific `category` column.
 
-use crate::{row::parse_topic_row, Error, Result, SearchPage, SearchResult};
+use crate::{row::parse_topic_row, Result, SearchPage, SearchResult};
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 
@@ -68,14 +68,10 @@ fn extract_search_id(doc: &Html, pg_sel: &Selector) -> Option<String> {
     None
 }
 
-#[allow(dead_code)]
-fn _unused_err_type_proof() -> Result<()> {
-    Err(Error::MissingElement("placeholder"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use encoding_rs::WINDOWS_1251;
 
     const FORUM_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/forum-sample.html");
@@ -120,5 +116,70 @@ mod tests {
     fn test_row0_topic_id_nonzero() {
         let page = parse_search_page(&fixture_html()).unwrap();
         assert!(page.results[0].topic_id > 0);
+    }
+
+    /// US-008 coverage: a table with rows that carry no `topic_id` (neither
+    /// `data-topic_id` nor a `viewtopic.php?t=` anchor) must be filtered out
+    /// by the `let Some(common) = … else { continue; };` branch in
+    /// `parse_search_page`. The returned page must have `results.len() == 0`
+    /// and `search_id` must be `None` (no `a.pg` pagination links either).
+    #[test]
+    fn test_rows_without_topic_id_are_filtered_and_no_search_id() {
+        let html = r#"<!DOCTYPE html>
+<html><body>
+<table id="tor-tbl"><tbody>
+  <tr><td class="f-name-col"><a>Category</a></td><td><a href="http://other/unrelated">no id here</a></td></tr>
+  <tr><td class="f-name-col"><a>X</a></td></tr>
+</tbody></table>
+</body></html>"#;
+        let page = parse_search_page(html).unwrap();
+        assert_eq!(
+            page.results.len(),
+            0,
+            "rows without topic_id must be filtered out"
+        );
+        assert!(
+            page.search_id.is_none(),
+            "search_id must be None when there are no a.pg links"
+        );
+    }
+
+    /// US-008 coverage: pagination `<a class="pg">` links without an `href`
+    /// attribute must be skipped (the `let Some(href) = … else { continue };`
+    /// branch). Likewise, pagination anchors whose hrefs lack `search_id=`
+    /// must be tolerated (the end-of-loop `None` branch). We build a page with
+    /// a single `<a class="pg">` that has no href and assert `search_id` is
+    /// `None` rather than panicking or mis-extracting.
+    #[test]
+    fn test_pg_anchor_without_href_and_without_search_id_yields_none() {
+        let html = r#"<!DOCTYPE html>
+<html><body>
+<table id="tor-tbl"><tbody></tbody></table>
+<!-- anchor with no href — hits `let Some(href) = … else { continue; };` -->
+<a class="pg">1</a>
+<!-- anchor with href that has no search_id= — falls through to `None` -->
+<a class="pg" href="tracker.php?start=50">2</a>
+</body></html>"#;
+        let page = parse_search_page(html).unwrap();
+        assert!(
+            page.search_id.is_none(),
+            "search_id must be None when no a.pg href contains search_id="
+        );
+    }
+
+    /// US-008 coverage: confirm `Error::MissingElement` remains displayable.
+    /// Keeps the variant alive by constructing and asserting its Display.
+    #[test]
+    fn test_missing_element_error_display_contains_detail() {
+        let e = Error::MissingElement("foo");
+        let s = e.to_string();
+        assert!(
+            s.contains("foo"),
+            "Display of MissingElement must include the field name, got: {s}"
+        );
+        assert!(
+            s.contains("missing"),
+            "Display of MissingElement must mention 'missing', got: {s}"
+        );
     }
 }

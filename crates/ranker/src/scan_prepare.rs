@@ -527,6 +527,83 @@ mod tests {
         assert_eq!(back.payload.comments.len(), 1);
     }
 
+    /// US-008: topic JSON whose `title`, `opening_post`, and `comments`
+    /// are all absent (empty object `{}`) must still be parseable because
+    /// every field is `#[serde(default)]`. Exercises the defaults at L62–L70.
+    #[test]
+    fn test_empty_topic_json_uses_serde_defaults() {
+        let _td = tempfile::TempDir::new().unwrap();
+        let root = _td.path();
+        let topics_dir = root.join("forums").join("252").join("topics");
+        fs::create_dir_all(&topics_dir).unwrap();
+        // Minimal JSON — all fields default.
+        fs::write(topics_dir.join("1001.json"), b"{}").unwrap();
+
+        let report = scan_prepare(root, "252", AGENT_SHA, ScanPrepareOpts::default()).unwrap();
+        assert_eq!(report.total, 1);
+        assert_eq!(report.queued, 1);
+        let lines = read_queue_lines(&root.join("forums").join("252"));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].total_comments, 0, "no comments in default topic");
+        assert_eq!(lines[0].included_comments, 0);
+        assert_eq!(lines[0].last_post_id, "0");
+    }
+
+    /// US-008: a topic whose single comment already exceeds the budget alone
+    /// causes `build_payload` to include zero comments — the first push is
+    /// rolled back on L277. Covers the edge case of a per-comment payload too
+    /// large to fit.
+    #[test]
+    fn test_build_payload_single_huge_comment_included_comments_zero() {
+        let _td = tempfile::TempDir::new().unwrap();
+        let root = _td.path();
+        let forum_dir = root.join("forums").join("252");
+        let topics_dir = forum_dir.join("topics");
+        // 2 KiB comment — exceeds a 256-byte budget on its own.
+        write_topic(&topics_dir, "1001", 2000, 1, &"X".repeat(2048));
+        let report = scan_prepare(
+            root,
+            "252",
+            AGENT_SHA,
+            ScanPrepareOpts {
+                max_payload_bytes: 256,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.queued, 1);
+        let lines = read_queue_lines(&forum_dir);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].included_comments, 0,
+            "huge comment must be rolled back under a tiny budget"
+        );
+        assert_eq!(lines[0].total_comments, 1);
+    }
+
+    /// US-008: the `topic_paths.sort()` call at L161 guarantees deterministic
+    /// ordering of the output queue. Write three topics in reverse-lexical
+    /// order and assert the queue file emits them ascending.
+    #[test]
+    fn test_output_queue_is_sorted_by_filename() {
+        let _td = tempfile::TempDir::new().unwrap();
+        let root = _td.path();
+        let forum_dir = root.join("forums").join("252");
+        let topics_dir = forum_dir.join("topics");
+        // Intentionally write in reverse order.
+        write_topic(&topics_dir, "3003", 2003, 1, "x");
+        write_topic(&topics_dir, "1001", 2001, 1, "x");
+        write_topic(&topics_dir, "2002", 2002, 1, "x");
+
+        scan_prepare(root, "252", AGENT_SHA, ScanPrepareOpts::default()).unwrap();
+        let lines = read_queue_lines(&forum_dir);
+        let order: Vec<_> = lines.iter().map(|l| l.topic_id.clone()).collect();
+        assert_eq!(
+            order,
+            vec!["1001".to_string(), "2002".to_string(), "3003".to_string()],
+            "queue must be emitted in ascending filename order"
+        );
+    }
+
     #[test]
     fn test_empty_queue_when_all_cached() {
         let _td = tempfile::TempDir::new().unwrap();

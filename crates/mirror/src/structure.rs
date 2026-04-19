@@ -62,6 +62,45 @@ mod tests {
         cow.into_owned()
     }
 
+    /// US-008: `Structure::empty()` produces the skeleton written by
+    /// `Mirror::init` before any live refresh. Cover the fields it sets.
+    #[test]
+    fn test_structure_empty_skeleton() {
+        let s = Structure::empty();
+        assert_eq!(s.schema_version, 1);
+        assert!(s.groups.is_empty());
+        assert!(s.fetched_at.is_none());
+    }
+
+    /// US-008: `Structure` round-trips through serde without losing the
+    /// `fetched_at` timestamp, protecting the on-disk format.
+    #[test]
+    fn test_structure_serde_round_trip_preserves_fetched_at() {
+        use rutracker_parser::{CategoryGroup, ForumCategory};
+        let s = Structure {
+            schema_version: 1,
+            groups: vec![CategoryGroup {
+                group_id: "cat-1".to_string(),
+                title: "Фильмы".to_string(),
+                forums: vec![ForumCategory {
+                    forum_id: "252".to_string(),
+                    name: "Фильмы 2026".to_string(),
+                    parent_id: Some("cat-1".to_string()),
+                }],
+            }],
+            fetched_at: Some("2026-04-18T20:00:00+00:00".to_string()),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Structure = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.schema_version, 1);
+        assert_eq!(back.groups.len(), 1);
+        assert_eq!(back.groups[0].forums[0].forum_id, "252");
+        assert_eq!(
+            back.fetched_at.as_deref(),
+            Some("2026-04-18T20:00:00+00:00")
+        );
+    }
+
     #[test]
     fn test_structure_json_contains_at_least_26_groups() {
         let td = TempDir::new().unwrap();

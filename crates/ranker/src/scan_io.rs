@@ -175,4 +175,50 @@ mod tests {
         assert!(scan_is_failed("6843582", tmp.path()));
         assert!(!scan_is_failed("9999999", tmp.path()));
     }
+
+    /// US-008: malformed JSON in a scan file surfaces as `ScanError::Json`
+    /// with the offending path preserved. Covers L83–L87.
+    #[test]
+    fn test_read_scan_malformed_json_returns_json_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("bad.scan.json");
+        std::fs::write(&path, b"{ not json at all ").unwrap();
+        let err = read_scan(&path).expect_err("malformed JSON must error");
+        match err {
+            ScanError::Json { path: p, source: _ } => {
+                assert_eq!(p, path, "error must carry the offending path");
+            }
+            other => panic!("expected ScanError::Json, got: {other:?}"),
+        }
+    }
+
+    /// US-008: `read_scan` returns `ScanError::Io` for an absent path, and
+    /// the error carries the attempted path. Covers the `fs::read(path)?`
+    /// map_err branch at L79–L82.
+    #[test]
+    fn test_read_scan_missing_file_returns_io_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("does-not-exist.scan.json");
+        let err = read_scan(&path).expect_err("absent file must error");
+        match err {
+            ScanError::Io { path: p, source: _ } => {
+                assert_eq!(p, path);
+            }
+            other => panic!("expected ScanError::Io, got: {other:?}"),
+        }
+    }
+
+    /// US-008: `is_cached` returns `false` when the scan file exists but is
+    /// malformed JSON (the `Err(_) => false` arm at L98). This is the path
+    /// that lets `scan_prepare` safely re-queue topics with corrupted caches.
+    #[test]
+    fn test_is_cached_returns_false_for_malformed_scan_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("1234.scan.json");
+        std::fs::write(&path, b"{ corrupt ").unwrap();
+        assert!(
+            !is_cached(&path, "any_sha", "any_lpid"),
+            "malformed scan must be treated as cache miss"
+        );
+    }
 }

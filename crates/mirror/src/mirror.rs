@@ -177,4 +177,61 @@ mod tests {
         let got = m.forum_topics_dir("252");
         assert_eq!(got, dir.join("forums").join("252").join("topics"));
     }
+
+    /// US-008: the `RUTRACKER_MIRROR_ROOT` override takes precedence over
+    /// `$HOME`. Covers L21–L24. We snapshot + restore env to keep the test
+    /// isolated.
+    #[test]
+    fn test_default_root_honours_rutracker_mirror_root_env() {
+        let prev = std::env::var("RUTRACKER_MIRROR_ROOT").ok();
+        // SAFETY: single-writer to this env var inside this test.
+        unsafe {
+            std::env::set_var(
+                "RUTRACKER_MIRROR_ROOT",
+                "/tmp/rutracker-mirror-root-override",
+            );
+        }
+        let got = default_root();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("RUTRACKER_MIRROR_ROOT", v),
+                None => std::env::remove_var("RUTRACKER_MIRROR_ROOT"),
+            }
+        }
+        assert_eq!(
+            got,
+            PathBuf::from("/tmp/rutracker-mirror-root-override"),
+            "RUTRACKER_MIRROR_ROOT must be returned verbatim"
+        );
+    }
+
+    /// US-008: empty `RUTRACKER_MIRROR_ROOT` falls through to the `$HOME`
+    /// branch. Covers the `if !v.is_empty()` guard at L22.
+    #[test]
+    fn test_default_root_empty_override_falls_back_to_home() {
+        let prev = std::env::var("RUTRACKER_MIRROR_ROOT").ok();
+        unsafe { std::env::set_var("RUTRACKER_MIRROR_ROOT", "") };
+        let got = default_root();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("RUTRACKER_MIRROR_ROOT", v),
+                None => std::env::remove_var("RUTRACKER_MIRROR_ROOT"),
+            }
+        }
+        // Empty override must NOT be returned; we should land on either
+        // $HOME/.rutracker/mirror or the last-resort relative fallback.
+        assert_ne!(
+            got.as_os_str(),
+            "",
+            "empty override must not produce empty root"
+        );
+        // On a dev machine HOME is always set; the assert handles both.
+        if std::env::var("HOME").is_ok() {
+            assert!(
+                got.ends_with(".rutracker/mirror"),
+                "empty override + HOME should yield $HOME/.rutracker/mirror, got {}",
+                got.display()
+            );
+        }
+    }
 }

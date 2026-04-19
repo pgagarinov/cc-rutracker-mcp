@@ -66,3 +66,49 @@ pub(crate) fn locate_repo_file(rel: &str) -> io::Result<PathBuf> {
 pub fn locate_agent_file() -> io::Result<PathBuf> {
     locate_repo_file(AGENT_REL_PATH)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// US-008: `locate_repo_file` returns `io::ErrorKind::NotFound` when the
+    /// relative path does not exist anywhere up the directory tree from
+    /// `CARGO_MANIFEST_DIR`. The error message must name the missing path.
+    /// Covers L54–L57.
+    #[test]
+    fn test_locate_repo_file_not_found_surfaces_io_not_found() {
+        let rel = ".does-not-exist-rutracker-test/absolutely-nowhere.md";
+        let err = locate_repo_file(rel).expect_err("missing file must error");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::NotFound,
+            "error kind must be NotFound, got: {:?}",
+            err.kind()
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(rel),
+            "error message must name the missing relative path, got: {msg}"
+        );
+        assert!(
+            msg.contains("walking up"),
+            "error message must mention 'walking up', got: {msg}"
+        );
+    }
+
+    /// US-008: `agent_sha_of` propagates filesystem errors when reading a
+    /// non-existent path. Covers the `?` in `std::fs::read(path)?` (L33).
+    #[test]
+    fn test_agent_sha_of_missing_file_surfaces_io_error() {
+        let path = std::path::PathBuf::from(
+            "/does-not-exist-rutracker-test/nowhere/rutracker-missing-sha.md",
+        );
+        let err = agent_sha_of(&path).expect_err("nonexistent path must error");
+        // Must be an I/O error (NotFound on unix, similar on other OSes).
+        assert!(
+            matches!(err.kind(), io::ErrorKind::NotFound),
+            "expected NotFound on missing file, got: {:?}",
+            err.kind()
+        );
+    }
+}

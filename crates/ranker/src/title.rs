@@ -393,4 +393,51 @@ mod tests {
         let err = parse_title("Film / Film2 [2020]").unwrap_err();
         assert!(matches!(err, TitleParseError::TooFewBracketFields(_)));
     }
+
+    /// US-008: a title with 4+ ` / ` title segments must have the trailing
+    /// segments merged into the third (alt) position — covers the
+    /// `split_at(2)` + `rest.join(" / ")` branch at L222–L226.
+    #[test]
+    fn test_split_title_chain_merges_extra_segments_into_alt() {
+        // Four title parts: first two are ru/en, remainder joins into alt.
+        let p = parse_title(
+            "Русское / English / Alt One / Alt Two (Director) [2020, США, драма, WEBRip] Dub",
+        )
+        .expect("should parse");
+        assert_eq!(p.title_ru, "Русское");
+        assert_eq!(p.title_en.as_deref(), Some("English"));
+        assert_eq!(
+            p.title_alt.as_deref(),
+            Some("Alt One / Alt Two"),
+            "third slot must absorb everything past the second ` / `"
+        );
+    }
+
+    /// US-008: a title containing `[` but no matching `]` is treated as
+    /// having no bracket block — covers the `s[open..].find(']')?` (L252)
+    /// returning None.
+    #[test]
+    fn test_title_with_unclosed_bracket_errors_with_no_bracket_block() {
+        let err =
+            parse_title("Russian / English (Director) [2020, США, драма, WEBRip").unwrap_err();
+        assert!(
+            matches!(err, TitleParseError::NoBracketBlock(_)),
+            "unclosed bracket must surface as NoBracketBlock, got: {err:?}"
+        );
+    }
+
+    /// US-008: a bracket block whose directors group is malformed (e.g.
+    /// mis-matched parens — `)` before `(`) must fall through to the
+    /// "no directors" path. The `split_directors` helper returns
+    /// `(s, None)` in that case.
+    #[test]
+    fn test_title_without_directors_parens() {
+        // No `(directors)` group at all — directors are absent in the output.
+        let p = parse_title("Русское / English [2020, США, драма, WEBRip] Dub").expect("parse");
+        assert!(
+            p.director.is_none(),
+            "title without `(…)` group must have director=None, got: {:?}",
+            p.director
+        );
+    }
 }

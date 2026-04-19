@@ -149,4 +149,79 @@ mod tests {
         invalidate(&path).unwrap();
         assert!(!path.exists());
     }
+
+    /// US-008: `invalidate` on a non-existent path is a no-op and must NOT
+    /// error — the `path.exists()` guard short-circuits the remove.
+    #[test]
+    fn test_invalidate_absent_path_is_noop() {
+        let dir = tempdir("invalidate-absent");
+        let absent = dir.join("never-created.json");
+        assert!(!absent.exists());
+        invalidate(&absent).expect("invalidate of absent file must succeed");
+        assert!(!absent.exists(), "path must still be absent after no-op");
+    }
+
+    // Serializes the two tests that mutate RUTRACKER_COOKIE_CACHE. `set_var` /
+    // `remove_var` are process-global, so without this lock the two tests race
+    // when cargo-llvm-cov runs the test binary with its default thread count.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// US-008: `default_cache_path` returns the `RUTRACKER_COOKIE_CACHE`
+    /// env var verbatim when set.
+    #[test]
+    fn test_default_cache_path_honours_override_env() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var("RUTRACKER_COOKIE_CACHE").ok();
+        let marker = format!("/tmp/rutracker-cache-override-{}", std::process::id());
+        // SAFETY: altering env is safe — ENV_MUTEX serializes the mutation.
+        unsafe { std::env::set_var("RUTRACKER_COOKIE_CACHE", &marker) };
+        let got = default_cache_path().unwrap();
+        // Restore before any assert, to prevent pollution if the assert panics.
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("RUTRACKER_COOKIE_CACHE", v),
+                None => std::env::remove_var("RUTRACKER_COOKIE_CACHE"),
+            }
+        }
+        assert_eq!(
+            got.to_string_lossy(),
+            marker,
+            "override env var must be returned verbatim"
+        );
+    }
+
+    /// US-008: `default_cache_path` without the env var falls back to
+    /// `$HOME/.rutracker/cookies.json`.
+    #[test]
+    fn test_default_cache_path_default_location_under_home() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var("RUTRACKER_COOKIE_CACHE").ok();
+        // SAFETY: we're explicitly clearing a single env var we own.
+        unsafe { std::env::remove_var("RUTRACKER_COOKIE_CACHE") };
+        let got = default_cache_path().unwrap();
+        unsafe {
+            if let Some(v) = original {
+                std::env::set_var("RUTRACKER_COOKIE_CACHE", v);
+            }
+        }
+        assert!(
+            got.ends_with(".rutracker/cookies.json"),
+            "default must land at $HOME/.rutracker/cookies.json, got: {}",
+            got.display()
+        );
+    }
+
+    /// US-008: corrupt JSON in the cache file surfaces as `Error::LocalStateParse`,
+    /// covering the `serde_json::from_slice(&bytes).map_err(…)` branch at L47.
+    #[test]
+    fn test_load_corrupt_json_returns_localstateparse_error() {
+        let dir = tempdir("corrupt");
+        let path = dir.join("cookies.json");
+        std::fs::write(&path, b"{ not valid json at all ").unwrap();
+        let err = load(&path, DEFAULT_TTL).expect_err("corrupt cache must error");
+        assert!(
+            matches!(err, Error::LocalStateParse(_)),
+            "expected LocalStateParse, got: {err:?}"
+        );
+    }
 }

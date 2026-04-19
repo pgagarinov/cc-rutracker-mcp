@@ -244,4 +244,71 @@ mod tests {
         assert_eq!(meta.year, Some(2026));
         assert!(meta.kinopoisk_url.is_some());
     }
+
+    /// US-008: when `span#tor-size-humn` is absent, the parser must fall
+    /// back to `a.dl-stub` (L41–L46). Build a minimal topic HTML without
+    /// the primary size span and assert the fallback fires.
+    #[test]
+    fn test_size_falls_back_to_dl_stub_when_humn_span_absent() {
+        let html = r#"<html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewtopic.php?t=777">
+</head><body>
+<h1 id="topic-title">A topic</h1>
+<a class="magnet-link" href="magnet:?xt=urn:btih:abcd">magnet</a>
+<!-- no span#tor-size-humn — must use a.dl-stub -->
+<a class="dl-stub">  4.56 GB  </a>
+<span class="seed"><b>10</b></span>
+<span class="leech"><b>2</b></span>
+<table><tbody id="post_101"><tr><td><div class="post_body">opening</div></td></tr></tbody></table>
+</body></html>"#;
+        let td = parse_topic_page(html).unwrap();
+        assert_eq!(
+            td.size, "4.56 GB",
+            "size must come from a.dl-stub when tor-size-humn is absent"
+        );
+        assert_eq!(td.topic_id, 777);
+    }
+
+    /// US-008: a topic page with NO `tbody[id^='post_']` posts (empty shell)
+    /// must yield empty description + `metadata == None` without panicking
+    /// (L72–L74 — the `else { (String::new(), None) }` branch).
+    #[test]
+    fn test_topic_without_posts_yields_empty_description_and_no_metadata() {
+        let html = r#"<html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewtopic.php?t=42">
+</head><body>
+<h1 id="topic-title">Empty shell</h1>
+</body></html>"#;
+        let td = parse_topic_page(html).unwrap();
+        assert_eq!(td.description, "", "no posts => empty description");
+        assert!(td.metadata.is_none(), "no posts => metadata must be None");
+        assert_eq!(td.comments.len(), 0);
+        assert_eq!(td.topic_id, 42);
+    }
+
+    /// US-008: post rows whose `id` attribute does NOT start with `post_`
+    /// (malformed scrape output) are filtered by the L149 `continue`
+    /// branch. We craft a document with two comment-shaped posts where the
+    /// first has `id="post_5"` (valid) and the second has a non-parsable
+    /// id (`id="post_abc"`). Only the first should appear.
+    #[test]
+    fn test_malformed_post_id_is_skipped() {
+        let html = r#"<html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewtopic.php?t=9">
+</head><body>
+<table>
+<tbody id="post_1"><tr><td><div class="post_body">opening</div></td></tr></tbody>
+<tbody id="post_5"><tr><td><p class="nick">alice</p><div class="post_body">hello</div></td></tr></tbody>
+<tbody id="post_abc"><tr><td><p class="nick">bob</p><div class="post_body">skipped</div></td></tr></tbody>
+</table>
+</body></html>"#;
+        let td = parse_topic_page(html).unwrap();
+        assert_eq!(
+            td.comments.len(),
+            1,
+            "only the post with numeric id must become a comment"
+        );
+        assert_eq!(td.comments[0].post_id, 5);
+        assert_eq!(td.comments[0].author, "alice");
+    }
 }

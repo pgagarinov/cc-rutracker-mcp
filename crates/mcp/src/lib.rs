@@ -280,6 +280,60 @@ mod tests {
         );
     }
 
+    /// US-008: a `tools/call` for an unknown tool name must surface as a
+    /// JSON-RPC error with code -32000 and a message containing the failure
+    /// detail. Covers L87.
+    #[tokio::test]
+    async fn test_tools_call_unknown_tool_returns_error_response() {
+        let cfg = cli_config_for_mcp("https://example.test/forum/".into(), HashMap::new());
+        let req_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": { "name": "does_not_exist_tool", "arguments": {} }
+        });
+        let req: Request = serde_json::from_value(req_body).unwrap();
+        let resp = handle_request(req, &cfg).await;
+        let err = resp.error.expect("dispatch failure must surface as error");
+        assert_eq!(err.code, -32000);
+        assert!(
+            err.message.starts_with("tool call failed"),
+            "error message must say `tool call failed`, got: {}",
+            err.message
+        );
+    }
+
+    /// US-008: `Response::err` constructs an error response with no
+    /// result set, preserving the caller's id value. Covers the bare
+    /// error constructor explicitly.
+    #[test]
+    fn test_response_err_shape() {
+        let r = Response::err(Some(Value::from(42)), -32001, "oops");
+        assert!(r.result.is_none());
+        let e = r.error.expect("err response must have an error body");
+        assert_eq!(e.code, -32001);
+        assert_eq!(e.message, "oops");
+        assert!(e.data.is_none());
+        assert_eq!(r.id, Some(Value::from(42)));
+    }
+
+    /// US-008: `ping` method returns an empty JSON object on success.
+    /// Covers the ping arm at L89.
+    #[tokio::test]
+    async fn test_ping_returns_empty_object() {
+        let cfg = cli_config_for_mcp("https://example.test/forum/".into(), HashMap::new());
+        let req = parse_req(r#"{"jsonrpc":"2.0","id":5,"method":"ping","params":{}}"#);
+        let resp = handle_request(req, &cfg).await;
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert!(result.is_object());
+        assert_eq!(
+            result.as_object().unwrap().len(),
+            0,
+            "ping response body must be an empty object"
+        );
+    }
+
     #[tokio::test]
     async fn test_stdio_handshake_initialize() {
         // Snapshot test for the initialize → response roundtrip shape.

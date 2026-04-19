@@ -160,6 +160,44 @@ mod tests {
         assert_eq!(err.to_string(), r#"no forum matches "bogus""#);
     }
 
+    /// US-008: two forums sharing the exact same name must yield
+    /// `ResolveError::Ambiguous` from the `n if n > 1` branch of the exact-
+    /// match match (L52–L60). This is distinct from the substring-ambiguous
+    /// path already covered.
+    #[test]
+    fn test_exact_match_multiple_forums_returns_ambiguous() {
+        // Two forums with the identical name "Фильмы 2026" — exact match
+        // returns 2 hits.
+        let structure = make_structure(&[("252", "Фильмы 2026"), ("999", "Фильмы 2026")]);
+        let err = resolve_forum_ref(&structure, "Фильмы 2026").unwrap_err();
+        match err {
+            ResolveError::Ambiguous { query, matches } => {
+                assert_eq!(query, "Фильмы 2026");
+                assert_eq!(
+                    matches.len(),
+                    2,
+                    "both exact-match forums must appear in the ambiguous candidates"
+                );
+                let ids: Vec<&str> = matches.iter().map(|(id, _)| id.as_str()).collect();
+                assert!(ids.contains(&"252"));
+                assert!(ids.contains(&"999"));
+            }
+            other => panic!("expected Ambiguous from exact-match collision, got: {other:?}"),
+        }
+    }
+
+    /// US-008: the `NoStructure` variant of `ResolveError` has a static
+    /// Display string. Keep it covered so renames / message changes are caught.
+    #[test]
+    fn test_no_structure_error_display() {
+        let err = ResolveError::NoStructure;
+        let s = err.to_string();
+        assert!(
+            s.contains("structure.json"),
+            "NoStructure Display must mention structure.json, got: {s}"
+        );
+    }
+
     #[test]
     fn test_ambiguous_substring_returns_error_with_candidates() {
         let structure = make_structure(&[

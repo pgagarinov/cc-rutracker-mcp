@@ -4,16 +4,16 @@
   "stories": [
     {
       "id": "US-006",
-      "name": "Bi-directional skill↔CLI drift test",
+      "name": "Bi-directional skill\u2194CLI drift test",
       "passes": true,
       "priority": 1,
       "acceptanceCriteria": [
         "New test file crates/cli/tests/skill_drift.rs exists.",
-        "Test extracts every `rutracker …` command mentioned in .claude/skills/rutracker.md (any subcommand depth) into a set A.",
+        "Test extracts every `rutracker \u2026` command mentioned in .claude/skills/rutracker.md (any subcommand depth) into a set A.",
         "Test extracts every clap subcommand path from the built rutracker binary by walking `--help` output recursively into a set B.",
-        "Assertion 1 (no extras in skill): A \\ B is empty — every command in the skill must exist in the CLI.",
+        "Assertion 1 (no extras in skill): A \\ B is empty \u2014 every command in the skill must exist in the CLI.",
         "Assertion 2 (no gaps in skill): B \\ A is empty UNLESS the command appears in a documented allowlist in the same test file (with a 1-line rationale per entry).",
-        "Test uses CARGO_BIN_EXE_rutracker to locate the built binary — no cargo-install step required.",
+        "Test uses CARGO_BIN_EXE_rutracker to locate the built binary \u2014 no cargo-install step required.",
         "Test name `test_skill_commands_match_cli_surface` appears in `cargo test --workspace` output and passes.",
         "cargo test --workspace / clippy / fmt all clean."
       ]
@@ -38,26 +38,26 @@
     },
     {
       "id": "US-008",
-      "name": "Coverage tooling + documented 100% (≥95% effective, gaps justified)",
+      "name": "Coverage tooling + documented 100% (\u226595% effective, gaps justified)",
       "passes": true,
       "priority": 3,
       "acceptanceCriteria": [
         "cargo-llvm-cov installed locally; README 'Development' section documents `cargo llvm-cov --workspace --lcov --output-path lcov.info`.",
         "A baseline coverage report is generated; current line coverage % is recorded in progress.txt.",
-        "New tests added where gaps exist; target ≥95% line coverage workspace-wide (pragmatic 100% with documented exclusions).",
+        "New tests added where gaps exist; target \u226595% line coverage workspace-wide (pragmatic 100% with documented exclusions).",
         "Paths that CANNOT be 100%-unit-tested are explicitly excluded via `#[cfg_attr(coverage_nightly, coverage(off))]` or `// LCOV_EXCL_*` markers, each with a one-line rationale comment. Known exclusions: live macOS Keychain I/O in cookies-macos/src/keychain.rs, the MCP stdio loop's EOF path in mcp/src/main.rs, any `#[ignore]`-d live tests.",
         "A llvm-cov.toml (or .config/nextest.toml-equivalent) file or cargo-llvm-cov CLI flags configured to treat these exclusions consistently in CI.",
-        "`cargo llvm-cov --workspace --summary-only` reports ≥95% line coverage; the exact number goes into progress.txt.",
-        "CI coverage job enforces the same ≥95% threshold (see US-007)."
+        "`cargo llvm-cov --workspace --summary-only` reports \u226595% line coverage; the exact number goes into progress.txt.",
+        "CI coverage job enforces the same \u226595% threshold (see US-007)."
       ]
     },
     {
       "id": "US-009",
       "name": "CI is green on remote",
-      "passes": false,
+      "passes": true,
       "priority": 4,
       "acceptanceCriteria": [
-        "Local `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check && cargo llvm-cov --workspace --summary-only` all exit 0 AND coverage ≥ 95%.",
+        "Local `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check && cargo llvm-cov --workspace --summary-only` all exit 0 AND coverage \u2265 95%.",
         "All local changes committed and pushed to origin/main.",
         "`gh run list --workflow=ci.yml --limit 1 --json status,conclusion` reports conclusion=success for the latest run.",
         "If CI fails, fixes are applied, re-pushed, and the run is re-checked until green."

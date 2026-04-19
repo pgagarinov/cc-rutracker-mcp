@@ -173,3 +173,59 @@ fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// US-008: `parse_ts` returns `None` for a non-RFC3339 input, covering the
+    /// `.ok()` swallowing the parse error on L173.
+    #[test]
+    fn test_parse_ts_rejects_non_rfc3339_returns_none() {
+        assert!(parse_ts("not a timestamp").is_none());
+        assert!(
+            parse_ts("2026-04-18 12:34:56").is_none(),
+            "space-separator not rfc3339"
+        );
+        assert!(parse_ts("").is_none());
+    }
+
+    /// US-008: `parse_ts` yields `Some(DateTime<Utc>)` for a valid RFC3339
+    /// timestamp. Covers the `Some(...)` arm at L174.
+    #[test]
+    fn test_parse_ts_accepts_rfc3339_and_normalises_to_utc() {
+        let got = parse_ts("2026-04-18T20:00:00+00:00").expect("rfc3339 parse");
+        assert_eq!(got.to_rfc3339(), "2026-04-18T20:00:00+00:00");
+        // Non-UTC offset must be normalised.
+        let plus3 = parse_ts("2026-04-18T23:00:00+03:00").expect("rfc3339 parse with tz");
+        assert_eq!(
+            plus3.to_rfc3339(),
+            "2026-04-18T20:00:00+00:00",
+            "+03:00 must normalise to 20:00Z"
+        );
+    }
+
+    /// US-008: `DriverError::GaveUp` Display message must include the forum id
+    /// and attempts count — keep the enum's Display from drifting silently.
+    #[test]
+    fn test_driver_error_gaveup_display_mentions_forum_and_attempts() {
+        let e = DriverError::GaveUp {
+            forum_id: "252".into(),
+            attempts: 7,
+        };
+        let s = e.to_string();
+        assert!(s.contains("252"), "Display must mention forum_id: {s}");
+        assert!(s.contains('7'), "Display must mention attempts: {s}");
+    }
+
+    /// US-008: `ForumSummary` and `SyncSummary` equality is what the CLI
+    /// driver comparisons rely on. A default `SyncSummary` must equal another.
+    #[test]
+    fn test_sync_summary_default_is_empty_and_equal() {
+        let a = SyncSummary::default();
+        let b = SyncSummary::default();
+        assert_eq!(a, b);
+        assert!(a.forums_ok.is_empty());
+        assert!(a.forums_failed.is_empty());
+    }
+}

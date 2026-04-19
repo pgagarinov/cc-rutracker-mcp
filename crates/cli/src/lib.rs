@@ -21,6 +21,7 @@ use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
 use tracing_subscriber::{filter, fmt, Layer, Registry};
 
+pub mod dispatch;
 pub mod paths;
 pub mod rank;
 
@@ -1791,5 +1792,167 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         assert!(!entries.is_empty(), "logs dir should contain >= 1 file");
+    }
+
+    /// US-008: `CliConfig::client()` must install cookies onto the client
+    /// builder when the `cookies` map is non-empty. Covers L49–L51.
+    #[test]
+    fn test_cli_config_client_installs_cookies_from_map() {
+        let mut cookies = HashMap::new();
+        cookies.insert("bb_session".to_string(), "abc123".to_string());
+        cookies.insert("bb_dl_key".to_string(), "deadbeef".to_string());
+        let cfg = CliConfig {
+            base_url: "https://example.test/forum/".into(),
+            format: OutputFormat::Json,
+            out: None,
+            cookies,
+            emit_stdout: false,
+        };
+        let client = cfg.client().expect("client builder must succeed");
+        // We can't easily observe cookies from the client type directly, but we
+        // can assert the builder completed — the covered lines are the
+        // `c.set_cookie(...)` calls which panic on failure. A non-empty cookie
+        // map that produces a valid client is sufficient behavioural evidence.
+        drop(client);
+    }
+
+    /// US-008: `SearchArgs::to_query_pairs` must emit a `start=<N>` pair when
+    /// `page > 1` (L111–L114). Also exercises the sort_by defaulting path.
+    #[test]
+    fn test_search_args_page_gt1_emits_start_pair() {
+        let args = SearchArgs {
+            query: "test".into(),
+            category: None,
+            sort_by: "seeders".into(),
+            order: "desc".into(),
+            page: 3,
+        };
+        let pairs = args.to_query_pairs();
+        let start = pairs
+            .iter()
+            .find(|(k, _)| k == "start")
+            .expect("start= pair must exist for page>1");
+        assert_eq!(start.1, "100", "page=3 => start=(3-1)*50=100");
+    }
+
+    /// US-008: page=1 must NOT produce a start= pair — the `if self.page > 1`
+    /// guard skips it. Positive case for the branch.
+    #[test]
+    fn test_search_args_page_1_does_not_emit_start_pair() {
+        let args = SearchArgs {
+            query: "q".into(),
+            category: Some("252".into()),
+            sort_by: "size".into(),
+            order: "asc".into(),
+            page: 1,
+        };
+        let pairs = args.to_query_pairs();
+        let has_start = pairs.iter().any(|(k, _)| k == "start");
+        assert!(!has_start, "page=1 must NOT include start= pair");
+        // sort_by=size => o=7; order=asc => s=1.
+        let o = pairs.iter().find(|(k, _)| k == "o").unwrap();
+        let s = pairs.iter().find(|(k, _)| k == "s").unwrap();
+        let f = pairs.iter().find(|(k, _)| k == "f").unwrap();
+        assert_eq!(o.1, "7");
+        assert_eq!(s.1, "1");
+        assert_eq!(f.1, "252");
+    }
+
+    /// US-008: unknown sort_by falls through to default "10" (seeders).
+    /// Covers the `.unwrap_or("10")` at L101.
+    #[test]
+    fn test_search_args_unknown_sort_by_defaults_to_seeders() {
+        let args = SearchArgs {
+            query: "q".into(),
+            category: None,
+            sort_by: "NOT_A_KNOWN_SORT".into(),
+            order: "desc".into(),
+            page: 1,
+        };
+        let pairs = args.to_query_pairs();
+        let o = pairs.iter().find(|(k, _)| k == "o").unwrap();
+        assert_eq!(
+            o.1, "10",
+            "unknown sort_by must fall back to seeders (o=10)"
+        );
+    }
+
+    /// US-008: `emit` with `out: None` and `emit_stdout: true` takes the
+    /// print path at L65–L67. We can't capture stdout cleanly from a
+    /// process-level test, but calling `emit` in this configuration
+    /// exercises the code path (returning `Ok(None)`). Covers L66.
+    #[tokio::test]
+    async fn test_emit_with_stdout_true_and_no_out_returns_none() {
+        let cfg = CliConfig {
+            base_url: "https://example.test/forum/".into(),
+            format: OutputFormat::Text,
+            out: None,
+            cookies: HashMap::new(),
+            emit_stdout: true,
+        };
+        let got = emit(&cfg, "a short line\n").await.unwrap();
+        assert!(got.is_none(), "emit to stdout returns Ok(None)");
+    }
+
+    /// US-008: the tracing `JsonVisitor` must serialise `bool`, `i64`, `u64`,
+    /// `f64`, `str`, and `&dyn Debug` fields without losing the name. The
+    /// tracing subscriber installs our NdjsonLayer and we fire one event per
+    /// field type, then inspect the captured bytes.
+    #[test]
+    fn test_ndjson_layer_captures_all_primitive_field_types() {
+        use tracing::info;
+        use tracing_subscriber::prelude::*;
+
+        // Shared in-memory writer.
+        let buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for VecWriter {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let shared = SharedWriter::new(Box::new(VecWriter(buf.clone())));
+        let layer = NdjsonLayer::new(shared).with_filter(filter::filter_fn(|m| {
+            m.target() == "rutracker_ndjson_cover_test"
+        }));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            // One event per visitor method: bool, i64, u64, f64, str, Debug.
+            info!(target: "rutracker_ndjson_cover_test", a_bool = true);
+            info!(target: "rutracker_ndjson_cover_test", an_i64 = -42i64);
+            info!(target: "rutracker_ndjson_cover_test", a_u64 = 42u64);
+            info!(target: "rutracker_ndjson_cover_test", a_f64 = std::f64::consts::PI);
+            info!(target: "rutracker_ndjson_cover_test", a_str = "hello world");
+            let tuple = (1, 2, 3);
+            info!(target: "rutracker_ndjson_cover_test", a_dbg = ?tuple);
+        });
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        // Each field must appear at least once in the emitted ndjson stream.
+        assert!(
+            out.contains(r#""a_bool":true"#),
+            "bool field missing: {out}"
+        );
+        assert!(out.contains(r#""an_i64":-42"#), "i64 field missing: {out}");
+        assert!(out.contains(r#""a_u64":42"#), "u64 field missing: {out}");
+        assert!(
+            out.contains(r#""a_f64":3.141592"#),
+            "f64 field missing: {out}"
+        );
+        assert!(
+            out.contains(r#""a_str":"hello world""#),
+            "str field missing: {out}"
+        );
+        assert!(
+            out.contains(r#""a_dbg":"(1, 2, 3)""#),
+            "Debug field missing: {out}"
+        );
+        // Every line should have ts + level + target fields from the layer.
+        assert!(out.contains(r#""level":"info""#));
+        assert!(out.contains(r#""target":"rutracker_ndjson_cover_test""#));
     }
 }

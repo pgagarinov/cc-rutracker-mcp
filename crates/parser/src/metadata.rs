@@ -186,4 +186,56 @@ mod tests {
             meta.genres
         );
     }
+
+    /// US-008: anchors whose `href` attribute contains `imdb.com` populate
+    /// `imdb_url` (L49). Covers the previously-only-kinopoisk branch. Also
+    /// confirms that `<a>` tags without `href` are tolerated via the L46
+    /// `else { continue; }` branch.
+    #[test]
+    fn test_imdb_url_populated_and_anchors_without_href_skipped() {
+        let html = r#"<html><body><table><tbody id="post_1"><tr><td><div class="post_body">
+<a name="bookmark"></a>
+<a href="https://www.imdb.com/title/tt1234567/">IMDb</a>
+<a href="https://rutracker.org/forum/viewtopic.php?t=1">other</a>
+</div></td></tr></tbody></table></body></html>"#;
+        let doc = Html::parse_document(html);
+        let sel = Selector::parse("tbody[id^='post_'] div.post_body").unwrap();
+        let op = doc.select(&sel).next().unwrap();
+        let meta = parse_topic_metadata(op);
+        assert_eq!(
+            meta.imdb_url.as_deref(),
+            Some("https://www.imdb.com/title/tt1234567/"),
+            "imdb_url must be populated from the imdb.com anchor"
+        );
+        assert!(
+            meta.kinopoisk_url.is_none(),
+            "no kinopoisk.ru link => kinopoisk_url must be None"
+        );
+    }
+
+    /// US-008: when the opening post body contains label-value pairs broken
+    /// by a `<br>` tag, the walker must stop at the `<br>` (L31–L33 of
+    /// metadata.rs). Assert that a second `post-b` label after a `<br>` is
+    /// picked up cleanly.
+    #[test]
+    fn test_break_tag_terminates_value_capture() {
+        let html = r#"<html><body><table><tbody id="post_1"><tr><td><div class="post_body">
+<span class="post-b">Год выпуска</span> 2024<br>
+<span class="post-b">Жанр</span> драма, триллер
+</div></td></tr></tbody></table></body></html>"#;
+        let doc = Html::parse_document(html);
+        let sel = Selector::parse("tbody[id^='post_'] div.post_body").unwrap();
+        let op = doc.select(&sel).next().unwrap();
+        let meta = parse_topic_metadata(op);
+        assert_eq!(
+            meta.year,
+            Some(2024),
+            "year must be captured before the <br>"
+        );
+        assert_eq!(
+            meta.genres,
+            vec!["драма".to_string(), "триллер".to_string()],
+            "second label after <br> must be captured independently"
+        );
+    }
 }

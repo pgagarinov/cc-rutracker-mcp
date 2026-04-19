@@ -90,6 +90,69 @@ mod tests {
         assert!(err.to_string().contains("sandbox"));
     }
 
+    /// US-008: path with no parent (the file-system root) takes the
+    /// `Some(parent) = p.parent() else { return … }` branch. `/` has no
+    /// parent so `resolve` returns the path verbatim. Under the default
+    /// sandbox the root is outside both $HOME and CWD → rejected.
+    #[cfg(unix)]
+    #[test]
+    fn test_root_path_has_no_parent_and_is_rejected_by_sandbox() {
+        // `/` has no parent — exercises the `Some(parent) = … else` branch.
+        let err = validate_out_dir(Path::new("/"), false).unwrap_err();
+        assert!(
+            err.to_string().contains("sandbox"),
+            "root path must be rejected by sandbox, got: {err}"
+        );
+    }
+
+    /// US-008: a path whose parent is the empty string resolves to itself
+    /// unchanged, exercising the `parent.as_os_str().is_empty()` early
+    /// return in `resolve`. A bare filename like `out.txt` has `Path::parent
+    /// == Some("")`.
+    #[test]
+    fn test_bare_filename_has_empty_parent_and_uses_verbatim_resolution() {
+        // `out.txt` has `parent == Some("")` → we should not canonicalize an
+        // empty string. The sandbox check then compares the verbatim path
+        // against $HOME/CWD. Since CWD accepts relative descendants we
+        // expect either Ok or a deterministic sandbox reject — both hit the
+        // empty-parent branch at line 38–40.
+        let _ = validate_out_dir(Path::new("out.txt"), false);
+        // Regardless of sandbox outcome, assert the allow_path=true override
+        // accepts a bare filename deterministically (covers the same branch
+        // via the `resolve` helper being called).
+        validate_out_dir(Path::new("out.txt"), true).unwrap();
+    }
+
+    /// US-008: a deeply-nested non-existent path forces `resolve` to walk
+    /// upward from `parent` until an existing ancestor is found, hitting
+    /// the loop at lines 45–55 in paths.rs.
+    #[test]
+    fn test_deeply_nested_nonexistent_path_under_home_is_accepted() {
+        let home = dirs::home_dir().unwrap();
+        let deep = home
+            .join("rutracker-does-not-exist-1")
+            .join("also-absent-2")
+            .join("still-missing-3")
+            .join("out.file");
+        // Must not panic and must not error — the walk-upward branch should
+        // find $HOME as the existing ancestor and accept the path.
+        validate_out_dir(&deep, false).expect("deep nonexistent path under $HOME is in-sandbox");
+    }
+
+    /// US-008: a deeply-nested non-existent path whose ancestors are all
+    /// outside $HOME / CWD must be rejected by the sandbox. This also walks
+    /// the loop in `resolve` all the way up.
+    #[cfg(unix)]
+    #[test]
+    fn test_deeply_nested_nonexistent_path_outside_sandbox_is_rejected() {
+        let deep = Path::new("/etc/does-not-exist-1/also-absent-2/out.file");
+        let err = validate_out_dir(deep, false).unwrap_err();
+        assert!(
+            err.to_string().contains("sandbox"),
+            "deeply-nested path outside sandbox must be rejected, got: {err}"
+        );
+    }
+
     /// Architect-finding M2 regression: a symlink inside $HOME that targets outside
     /// the sandbox must not allow an escape. The current canonicalize-the-parent logic
     /// should resolve the symlink to its real target, then reject on `starts_with`.

@@ -126,4 +126,25 @@ mod tests {
             "decrypt with wrong password must fail (PKCS#7 padding validation rejects garbage)"
         );
     }
+
+    /// US-008: a v10 ciphertext whose body length is not a multiple of 16
+    /// must error at the length check (L43–L48) — never reach the CBC
+    /// decoder. Assert we get `Error::Decrypt` with a message naming the
+    /// bad length.
+    #[test]
+    fn test_decrypt_rejects_body_not_multiple_of_16() {
+        // Body length = 7 (non-multiple-of-16).
+        let mut payload = Vec::from(*b"v10");
+        payload.extend_from_slice(&[0u8; 7]);
+        let err = decrypt(&payload, b"peanuts").expect_err("must reject odd-length body");
+        match err {
+            Error::Decrypt(msg) => {
+                assert!(
+                    msg.contains('7') && msg.contains("multiple"),
+                    "error message must name the bad length, got: {msg}"
+                );
+            }
+            other => panic!("expected Error::Decrypt, got: {other:?}"),
+        }
+    }
 }

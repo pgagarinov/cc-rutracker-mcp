@@ -36,44 +36,99 @@ fn locate_repo_file(rel: &str) -> PathBuf {
 // Set A — commands extracted from the skill file
 // ---------------------------------------------------------------------------
 
-/// Parse every `` `rutracker <subcommand chain>` `` occurrence in `text`.
-/// Returns normalised subcommand paths such as `"mirror watch add"`.
+/// Extract every `rutracker <subcommand chain>` mention from the skill doc,
+/// both from inline code spans (`` `rutracker …` ``) AND from fenced code
+/// blocks (``` ```bash \n rutracker … \n``` ```). Returns normalised
+/// subcommand paths such as `"mirror watch add"`.
 fn extract_skill_commands(text: &str) -> BTreeSet<String> {
-    // Match inline code spans containing `rutracker ...`
-    // Capture everything after "rutracker " up to the closing backtick.
-    let re = Regex::new(r"`rutracker ([^`]+)`").unwrap();
     let mut out = BTreeSet::new();
 
-    for cap in re.captures_iter(text) {
-        let rest = cap[1].trim().to_string();
-        // Split on whitespace and stop at the first token that:
-        //   - starts with `-` (flag), `<` (placeholder), `"` (quoted string)
-        //   - contains `/` (path) or `~` (home-relative path)
-        //   - is purely numeric (positional id like `6843582`)
-        //   - is `...` (ellipsis placeholder)
-        //   - starts with `→` or `|` (inline table / arrow notation)
-        let tokens: Vec<&str> = rest
-            .split_whitespace()
-            .take_while(|t| {
-                !t.starts_with('-')
-                    && !t.starts_with('<')
-                    && !t.starts_with('"')
-                    && !t.contains('/')
-                    && !t.contains('~')
-                    && *t != "..."
-                    && !t.chars().all(|c| c.is_ascii_digit())
-                    && !t.starts_with('→')
-                    && !t.starts_with('|')
-            })
-            .collect();
+    // --- Pass 1: inline backticks. `rutracker …` up to the closing backtick.
+    let inline = Regex::new(r"`rutracker ([^`]+)`").unwrap();
+    for cap in inline.captures_iter(text) {
+        if let Some(cmd) = normalise_command(&cap[1]) {
+            out.insert(cmd);
+        }
+    }
 
-        if tokens.is_empty() {
+    // --- Pass 2: fenced code blocks. Walk the text and, when inside a
+    // ``` fence (any language tag or none), collect any line starting with
+    // `rutracker ` (after optional leading whitespace / `$ ` shell prompt).
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") {
+            in_fence = !in_fence;
             continue;
         }
-        out.insert(tokens.join(" "));
+        if !in_fence {
+            continue;
+        }
+        // Strip optional shell prompt (`$ ` or `> `).
+        let mut body = trimmed_start;
+        for prefix in ["$ ", "> ", "# "] {
+            if let Some(rest) = body.strip_prefix(prefix) {
+                body = rest;
+                break;
+            }
+        }
+        if let Some(rest) = body.strip_prefix("rutracker ") {
+            // Drop any trailing `# comment` that follows the command.
+            let rest_no_comment = match rest.find(" #") {
+                Some(i) => &rest[..i],
+                None => rest,
+            };
+            // Drop anything after a shell operator (`|`, `&&`, `;`, `>`).
+            let rest_clean = split_before_shell_op(rest_no_comment);
+            if let Some(cmd) = normalise_command(rest_clean) {
+                out.insert(cmd);
+            }
+        }
     }
 
     out
+}
+
+/// Return the prefix of `s` that precedes any shell operator (`|`, `&&`,
+/// `;`, `>`, `<`). We only care about the leading subcommand chain.
+fn split_before_shell_op(s: &str) -> &str {
+    let mut cut = s.len();
+    for (i, ch) in s.char_indices() {
+        if matches!(ch, '|' | ';' | '>' | '<' | '&') {
+            cut = i;
+            break;
+        }
+    }
+    &s[..cut]
+}
+
+/// Take a rest-of-command string (everything after `rutracker `) and return
+/// just the leading subcommand path, stripping flags/placeholders/literals.
+/// Returns None if nothing useful remains (e.g. the command is bare
+/// `rutracker` with no subcommand).
+fn normalise_command(rest: &str) -> Option<String> {
+    let tokens: Vec<&str> = rest
+        .split_whitespace()
+        .take_while(|t| {
+            !t.starts_with('-')
+                && !t.starts_with('<')
+                && !t.starts_with('"')
+                && !t.starts_with('\'')
+                && !t.contains('/')
+                && !t.contains('~')
+                && !t.contains('=')
+                && *t != "..."
+                && !t.chars().all(|c| c.is_ascii_digit())
+                && !t.starts_with('→')
+                && !t.starts_with('|')
+                && !t.starts_with('$')
+        })
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" "))
+    }
 }
 
 // ---------------------------------------------------------------------------
