@@ -22,9 +22,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@29eef336d9b2848a0b548edc03f92a220660cdb8 # v4
+      - uses: dtolnay/rust-toolchain@e18b497796c12c097a38f9edb9d0641fb99eee32 # stable
+      - uses: Swatinem/rust-cache@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2
       - name: cargo test
         run: cargo test --workspace --locked
 
@@ -32,11 +32,11 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@29eef336d9b2848a0b548edc03f92a220660cdb8 # v4
+      - uses: dtolnay/rust-toolchain@e18b497796c12c097a38f9edb9d0641fb99eee32 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -44,8 +44,8 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@29eef336d9b2848a0b548edc03f92a220660cdb8 # v4
+      - uses: dtolnay/rust-toolchain@e18b497796c12c097a38f9edb9d0641fb99eee32 # stable
         with:
           components: rustfmt
       - name: cargo fmt
@@ -63,40 +63,20 @@ jobs:
       #   crates/cookies-macos/src/lib.rs       → macOS refresh glue (live Keychain)
       IGNORE_REGEX: 'crates/cookies-macos/src/keychain\.rs|crates/mcp/src/main\.rs|crates/cli/src/main\.rs|crates/cookies-macos/src/lib\.rs'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@29eef336d9b2848a0b548edc03f92a220660cdb8 # v4
+      - uses: dtolnay/rust-toolchain@e18b497796c12c097a38f9edb9d0641fb99eee32 # stable
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@055f5df8c3f65ea01cd41e9dc855becd88953486 # v2
+      - uses: taiki-e/install-action@34e114876b0b11c390a56381ad16ebd13914f8d5 # v2
         with:
           tool: cargo-llvm-cov
       - name: cargo llvm-cov (lcov output)
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info --ignore-filename-regex "$IGNORE_REGEX"
       - name: Enforce ≥95% line coverage
-        run: |
-          # Extract the line coverage percentage from the summary output.
-          # cargo llvm-cov --summary-only prints a table; the "TOTAL" line contains
-          # "Lines:" followed by count/total and then the percentage, e.g.:
-          #   TOTAL  ...  Lines: 1234/1300  94.92%
-          # We grep that line, pull the last percentage, and compare numerically.
-          SUMMARY=$(cargo llvm-cov --workspace --locked --summary-only --ignore-filename-regex "$IGNORE_REGEX" 2>&1)
-          echo "$SUMMARY"
-          PCT=$(echo "$SUMMARY" | grep -i 'TOTAL' | grep -oE '[0-9]+\.[0-9]+%' | tail -1 | tr -d '%')
-          if [ -z "$PCT" ]; then
-            echo "ERROR: could not parse coverage percentage from summary output."
-            exit 1
-          fi
-          echo "Line coverage: ${PCT}%"
-          # Use awk for floating-point comparison (bc not guaranteed on all runners).
-          PASS=$(awk "BEGIN { print ($PCT >= 95) ? \"yes\" : \"no\" }")
-          if [ "$PASS" != "yes" ]; then
-            echo "FAIL: line coverage ${PCT}% is below the required 95% threshold."
-            exit 1
-          fi
-          echo "OK: line coverage ${PCT}% meets the ≥95% requirement."
+        run: cargo llvm-cov report --fail-under-lines 95 --ignore-filename-regex "$IGNORE_REGEX"
       - name: Upload lcov.info artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov-report
           path: lcov.info

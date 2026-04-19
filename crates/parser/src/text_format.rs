@@ -85,24 +85,15 @@ mod tests {
 
     #[test]
     fn test_legacy_search_byte_equal() {
-        // legacy-search.txt was captured from the live Python MCP.
-        // We cannot reuse forum-sample.html here because the Python snapshot was taken
-        // from a live search response whose HTML we did not commit. Instead, we reparse
-        // forum-sample.html and compare its STRUCTURAL shape to the legacy snapshot:
-        // both begin with "Found N results:" and each row conforms to the documented
-        // format. The strict byte-equal snapshot test against Python MCP output lives
-        // in Phase 5 end-to-end tests.
+        // legacy-search.txt is a snapshot of format_search_legacy applied to
+        // forum-sample.html.  Byte-equal comparison catches any formatting regression.
         let html = decode(FORUM_FIXTURE);
         let page = parse_search_page(&html).unwrap();
         let rendered = format_search_legacy(&page.results);
-        assert!(
-            rendered.starts_with("Found 50 results:\n\n"),
-            "expected 'Found 50 results:' prefix"
-        );
-        // Legacy snapshot is known to start with 'Found <N> results:' — sanity assertion.
-        assert!(
-            LEGACY_SEARCH.starts_with("Found "),
-            "legacy search snapshot sanity: starts with 'Found '"
+        assert_eq!(
+            rendered.as_bytes(),
+            LEGACY_SEARCH.as_bytes(),
+            "search formatter output differs from committed snapshot"
         );
     }
 
@@ -163,26 +154,15 @@ mod tests {
 
     #[test]
     fn test_legacy_get_topic_byte_equal() {
-        // The legacy snapshot was captured from a live topic (t=6843582, "Project Hail Mary").
-        // Our fixture topic-sample.html is a different topic (t=6843582 in sample but with
-        // slightly different seed/leech counts at snapshot time). Strict byte-equality
-        // against the committed legacy snapshot is the Phase 5 end-to-end gate.
-        // For Phase 2 we assert that our formatter produces the same SHAPE:
-        // Title: ..., Size: ..., Seeds: N | Leeches: M, Magnet: ..., \nDescription:\n...
+        // legacy-get-topic.txt is a snapshot of format_topic_legacy applied to
+        // topic-sample.html.  Byte-equal comparison catches any formatting regression.
         let html = decode(TOPIC_FIXTURE);
         let td = parse_topic_page(&html).unwrap();
         let rendered = format_topic_legacy(&td);
-        assert!(rendered.starts_with("Title: "), "starts with Title:");
-        assert!(
-            rendered.contains("Seeds: ") && rendered.contains("| Leeches: "),
-            "has Seeds|Leeches line"
+        assert_eq!(
+            rendered.as_bytes(),
+            LEGACY_TOPIC.as_bytes(),
+            "topic formatter output differs from committed snapshot"
         );
-        assert!(
-            rendered.contains("\nDescription:\n"),
-            "has Description block"
-        );
-        // Legacy snapshot sanity.
-        assert!(LEGACY_TOPIC.starts_with("Title: "));
-        assert!(LEGACY_TOPIC.contains("\nDescription:\n"));
     }
 }

@@ -1651,19 +1651,82 @@ mod tests {
 
     #[tokio::test]
     async fn test_mirror_sync_text_mode_renders_forums_ok_rows() {
+        // Wire two forums (252 and 251), each with one topic, so the driver
+        // produces a non-empty forums_ok list and text-mode rendering emits
+        // one row per forum.
         let server = MockServer::start().await;
+
+        let make_forum_body = |f: &str, t: &str| {
+            format!(
+                r#"<!DOCTYPE html><html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewforum.php?f={f}">
+<title>Forum {f}</title></head><body>
+<table class="vf-tor"><tbody>
+<tr class="hl-tr" data-topic_id="{t}">
+  <td class="vf-col-t-title"><a class="tt-text" href="viewtopic.php?t={t}">Topic {t}</a></td>
+  <td class="u-name-col"><a>author</a></td>
+  <td class="tor-size"><u>100</u> MB</td>
+  <td><b class="seedmed">5</b></td>
+  <td class="leechmed">2</td>
+  <td class="vf-col-last-post"><p>18-Apr-26 12:00</p><p><a href="viewtopic.php?p=100#100">link</a></p></td>
+</tr>
+</tbody></table></body></html>"#
+            )
+        };
+        let make_topic_body = |t: &str| {
+            format!(
+                r##"<!DOCTYPE html><html><head>
+<link rel="canonical" href="https://rutracker.org/forum/viewtopic.php?t={t}">
+<title>Topic {t}</title></head><body>
+<h1 id="topic-title">Test topic {t}</h1>
+<a class="magnet-link" href="magnet:?xt=urn:btih:dummy{t}">Magnet</a>
+<span id="tor-size-humn">100 MB</span>
+<span class="seed"><b>5</b></span>
+<span class="leech"><b>2</b></span>
+<table><tbody id="post_1{t}">
+<tr><td><p class="nick">author</p><a class="p-link small" href="#">18-Apr-26 12:00</a><div class="post_body">Desc</div></td></tr>
+</tbody></table></body></html>"##
+            )
+        };
+
+        // Serve forum 252 (topic 9001) and forum 251 (topic 9002).
+        // Both share the same viewforum and viewtopic endpoints; wiremock
+        // will serve the first registered mock that matches, so we register
+        // per-query-param mocks.
+        use wiremock::matchers::query_param;
+        Mock::given(method("GET"))
+            .and(path("/forum/viewforum.php"))
+            .and(query_param("f", "252"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(make_forum_body("252", "9001")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forum/viewforum.php"))
+            .and(query_param("f", "251"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(make_forum_body("251", "9002")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forum/viewtopic.php"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(make_topic_body("9001")))
+            .mount(&server)
+            .await;
+
         let tmp = tempdir_unique("sync-text-ok");
         rutracker_mirror::Mirror::init(&tmp).unwrap();
-        // Empty forums list => driver returns empty summary; text render path
-        // is exercised but with 0 rows.
+
         let cfg = config_for(&server, OutputFormat::Text, None);
         let result = run_mirror_sync(
             &cfg,
             &SyncCliArgs {
                 root: Some(tmp.clone()),
-                forums: Vec::new(),
+                forums: vec!["252".into(), "251".into()],
                 max_topics: 5,
-                rate_rps: 1.0,
+                rate_rps: 10.0,
                 max_attempts_per_forum: 1,
                 cooldown_wait: false,
                 log_file: Some("".into()),
@@ -1672,7 +1735,29 @@ mod tests {
         )
         .await
         .unwrap();
-        // Text output is just "\n" (empty body + trailing newline).
+
+        assert_eq!(result.exit_code, 0);
+        // Each row has the form: "<forum_id>: topics=<N> attempts=<M> status=ok\n"
+        assert!(
+            result.output.contains("252:"),
+            "expected forum 252 row in text output, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("251:"),
+            "expected forum 251 row in text output, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("topics=1"),
+            "expected topics=1 in text output, got: {}",
+            result.output
+        );
+        assert!(
+            result.output.contains("status=ok"),
+            "expected status=ok in text output, got: {}",
+            result.output
+        );
         assert!(result.output.ends_with('\n'));
     }
 
